@@ -10,7 +10,7 @@ pipeline {
 
         stage('Checkout Code') {
             steps {
-                git url: 'https://github.com/gowdamanu12/ultimate-devops-project-demo.git',
+                git url: 'https://github.com/gowdamanu12/Project.git',
                     branch: 'main'
             }
         }
