@@ -2,51 +2,47 @@ pipeline {
     agent any
 
     environment {
-        IMAGE_NAME = "manugowda1998"
-        APP_PORT = "8088"
+        IMAGE_NAME = "manugowda1998"   // CHANGE THIS
+        DOCKERFILE_PATH = "."                          // OR set microservice path
     }
 
     stages {
 
-        stage('Checkout Code') {
+        stage('Checkout') {
             steps {
-                git url: 'https://github.com/gowdamanu12/Project.git',
-                    branch: 'main'
+                git branch: 'main',
+                    url: 'https://github.com/gowdamanu12/Project.git'
             }
         }
 
         stage('Build Docker Image') {
             steps {
-                script {
-                    sh """
-                        echo "Building Docker image..."
-                        docker build -t ${IMAGE_NAME}:latest .
-                    """
-                }
+                sh """
+                    echo 'Building Docker Image'
+                    docker build -t ${IMAGE_NAME}:latest ${DOCKERFILE_PATH}
+                """
             }
         }
 
         stage('Login to DockerHub') {
             steps {
                 withCredentials([
-                    usernamePassword(credentialsId: 'dockerhub_creds',
-                                     usernameVariable: 'DOCKER_USER',
-                                     passwordVariable: 'DOCKER_PASS')
+                    usernamePassword(
+                        credentialsId: 'dockerhub_creds',
+                        usernameVariable: 'manugowda1998',
+                        passwordVariable: 'Bnmanu@98'
+                    )
                 ]) {
                     sh """
-                        echo "$DOCKER_PASS" | docker login -u "$DOCKER_USER" --password-stdin
+                        echo "${DOCKER_PASS}" | docker login -u "${DOCKER_USER}" --password-stdin
                     """
                 }
             }
         }
 
-        stage('Push Docker Image') {
+        stage('Push Image') {
             steps {
-                script {
-                    sh """
-                        docker push ${IMAGE_NAME}:latest
-                    """
-                }
+                sh "docker push ${IMAGE_NAME}:latest"
             }
         }
     }
