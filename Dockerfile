@@ -24,7 +24,7 @@ FROM alpine AS release
 
 WORKDIR /usr/src/app/
 
-COPY ./products/ ./products/
+COPY ./products.json/ ./products.json/
 COPY --from=builder /usr/src/app/product-catalog/ ./
 
 ENV PRODUCT_CATALOG_PORT=8088
