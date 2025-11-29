@@ -1,11 +1,8 @@
-# Very simple Dockerfile for a Go app
-FROM golang:1.22-alpine AS build
+FROM nginx:latest
 
-WORKDIR /app
-COPY . .
-RUN go build -o app .
+# Copy your HTML application to NGINX default directory
+COPY ./html /usr/share/nginx/html
 
-FROM alpine
-WORKDIR /app
-COPY --from=build /app/app .
-CMD ["./app"]
+# Expose port 80
+EXPOSE 80
+
