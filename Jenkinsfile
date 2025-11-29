@@ -3,7 +3,7 @@ pipeline {
 
     environment {
         IMAGE_NAME = "manugowda1998/product-catalog" 
-        DOCKERFILE_PATH = "project/"    
+        DOCKERFILE_PATH = "Project/"    
     }
 
     stages {
