@@ -2,8 +2,8 @@ pipeline {
     agent any
 
     environment {
-        IMAGE_NAME = "manugowda1998"   // CHANGE THIS
-        DOCKERFILE_PATH = "."                          // OR set microservice path
+        IMAGE_NAME = "manugowda1998/product-catalog" 
+        DOCKERFILE_PATH = "project/"    
     }
 
     stages {
@@ -29,8 +29,8 @@ pipeline {
                 withCredentials([
                     usernamePassword(
                         credentialsId: 'dockerhub_creds',
-                        usernameVariable: 'manugowda1998',
-                        passwordVariable: 'Bnmanu@98'
+                        usernameVariable: 'DOCKER_USER',
+                        passwordVariable: 'DOCKER_PASS'
                     )
                 ]) {
                     sh """
