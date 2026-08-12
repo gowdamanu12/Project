@@ -1,0 +1,308 @@
+================================================================================
+  INTERVIEW QUESTIONS & ANSWERS
+  Role: SRE / Cloud DevOps / Platform Engineer / Full-Stack Developer
+  Project: MIH Automation Portal (Eli Lilly PR&D)
+  Date: August 2026
+================================================================================
+
+
+--------------------------------------------------------------------------------
+SECTION 1 — KUBERNETES
+--------------------------------------------------------------------------------
+
+Q1: What is the difference between liveness and readiness probes?
+A1: Readiness probe checks if a pod is ready to receive traffic. The pod is
+    removed from Service endpoints until it passes. Used at startup and
+    during load.
+    Liveness probe checks if a pod is alive. If it fails, Kubernetes
+    restarts the pod.
+    In this project: both probes hit /api/health. Readiness starts at
+    5s/10s period, liveness starts at 15s/20s period.
+
+Q2: How do you prevent resource starvation in Kubernetes?
+A2: resource.requests guarantees a minimum amount of CPU/memory scheduled
+    on a node. resource.limits caps the maximum usage. Without requests,
+    pods can be scheduled on already overloaded nodes. Without limits, one
+    pod can starve others.
+    Example: Frontend uses requests: cpu=1/memory=8Gi, limits: cpu=4/memory=8Gi.
+
+Q3: What is a nodeSelector and a toleration?
+A3: nodeSelector constrains a pod to nodes with matching labels.
+    Toleration allows a pod to be scheduled on tainted nodes.
+    Used here: nodeSelector app.lilly.com/env=dev, node-kind=general-purpose.
+    Toleration: key=app.lilly.com/env, value=dev, effect=NoSchedule.
+
+Q4: What Kubernetes CRDs have you worked with?
+A4: RDSInstance (Crossplane), ExternalSecret (ESO), HelmRelease (Flux),
+    ScaledObject/ScaledJob (KEDA), Instrumentation (OTel Operator),
+    PrometheusRule/ServiceMonitor/PodMonitor (Prometheus Operator),
+    AlertmanagerConfig, SecurityGroupPolicy, ImageUpdateAutomation (Flux).
+
+Q5: How do you handle zero-downtime deployments?
+A5: Rolling update strategy (default in Kubernetes Deployment). Readiness
+    probe ensures new pods are healthy before old ones are terminated.
+    Liveness probe handles stuck containers. A wave annotation handles
+    config-only restarts.
+
+Q6: What is the difference between ConfigMap and Secret?
+A6: ConfigMap holds non-sensitive config (env-specific values, feature
+    flags). Secret holds sensitive data (passwords, tokens) — base64
+    encoded in etcd, optionally encrypted at rest. In this project, the
+    Secret resource type is restricted by the custom validator —
+    ExternalSecret CRD sourced from AWS Secrets Manager is required
+    instead.
+
+
+--------------------------------------------------------------------------------
+SECTION 2 — GITOPS & CI/CD
+--------------------------------------------------------------------------------
+
+Q7: What is GitOps?
+A7: Git is treated as the single source of truth for cluster state. The
+    desired state is declared in Git, and automated tooling (Argo CD)
+    continuously reconciles the actual cluster state to match Git. No
+    manual kubectl apply is used in production.
+
+Q8: Argo CD vs Flux CD — differences and when to use each?
+A8: Argo CD is a full GitOps engine with a UI dashboard, RBAC, sync
+    policies, diff views, and health status — used as the primary
+    deployment tool.
+    Flux CD is lighter and better at image automation — it watches
+    ECR/registry for new tags and auto-updates YAML in Git.
+    Together: Flux updates the image tag in Git, then Argo detects the
+    change and deploys it.
+
+Q9: How does Flux image automation work?
+A9: An annotation on the Deployment specifies the ECR repo and a glob tag
+    pattern. Flux's ImageUpdateAutomation watches ECR, detects a new tag
+    matching the pattern, and commits the updated image tag to the Git
+    YAML. Argo then syncs the change.
+
+Q10: What is a merge queue?
+A10: A GitHub feature that batches multiple pull requests together before
+     merging to main. It tests the combined state rather than individual
+     PRs, preventing race conditions. merge_group events are handled
+     specially — re-validation is skipped since it was already done.
+
+Q11: How do you handle failed deployments?
+A11: Argo CD shows sync status. Rolling updates keep old pods running
+     until new ones pass readiness checks. Rollback is possible via the
+     Argo CD UI (reverts to a previous Git commit). Flux can also be
+     paused to stop automated image updates.
+
+Q12: What is auto-approve and auto-merge in your CI?
+A12: After validation passes (kubeconform + custom validator), a service
+     bot automatically approves and squash-merges the PR using the GitHub
+     CLI (gh pr review --approve + gh pr merge --squash). The branch is
+     deleted after merge.
+
+
+--------------------------------------------------------------------------------
+SECTION 3 — AWS & CLOUD INFRASTRUCTURE
+--------------------------------------------------------------------------------
+
+Q13: What is IRSA?
+A13: IAM Roles for Service Accounts. Kubernetes pods assume AWS IAM roles
+     via OIDC federation — no static AWS credentials are used. A
+     Kubernetes ServiceAccount is annotated with an IAM role ARN, and AWS
+     verifies the Kubernetes service account token via the OIDC provider.
+     Credentials are auto-rotated by the AWS SDK.
+
+Q14: How do you implement least-privilege IAM?
+A14: The S3 policy is scoped to a specific bucket and path prefix only.
+     s3:ListBucket is allowed only with a StringLike condition on the S3
+     prefix, and s3:* is allowed only on the wbwd_output-dev/* path — no
+     wildcard is used on the bucket itself.
+
+Q15: What is Crossplane?
+A15: A Kubernetes-native way to provision infrastructure. AWS resources
+     (RDS, S3, etc.) are defined as Kubernetes CRDs, and the platform team
+     manages them like ordinary Kubernetes objects — no separate Terraform
+     state files are needed. RDS credentials are automatically written to
+     a Kubernetes Secret via writeConnectionSecretToRef.
+
+Q16: How do you manage RDS in Kubernetes?
+A16: Through Crossplane's RDSInstance CRD. Its spec defines instance type,
+     engine version, storage, encryption, subnet group, and security
+     groups. Credentials are written to a Kubernetes Secret, and Alembic
+     migrations run as a Kubernetes Job before deployment.
+
+Q17: Two ECR accounts — why?
+A17: The frontend (283234040926) and backend (408787358807) are owned by
+     different teams with separate AWS accounts. This enforces
+     least-privilege — each team only pushes to its own registry, and
+     IRSA on each account is independently scoped.
+
+
+--------------------------------------------------------------------------------
+SECTION 4 — OBSERVABILITY
+--------------------------------------------------------------------------------
+
+Q18: What is Grafana Alloy?
+A18: An OpenTelemetry-compatible collection agent by Grafana that replaces
+     Grafana Agent. It collects metrics, logs, and traces using a pipeline
+     configuration language. In this project it receives Prometheus
+     metrics via remote_write and ships them to Loki.
+
+Q19: What is fan-out in observability?
+A19: Sending the same data to multiple backends simultaneously. Metrics
+     are fanned out to a local Prometheus instance (for cluster
+     dashboards) and to a management cluster Alloy instance (for central
+     cross-cluster monitoring).
+
+Q20: Prometheus pull vs push?
+A20: Prometheus by default pulls metrics by scraping /metrics endpoints.
+     Remote write is the push model — forwarding metrics to another
+     endpoint. This project uses remote_write to push metrics to a
+     central Alloy instance via an NLB.
+
+Q21: How do you alert on Kubernetes issues?
+A21: A PrometheusRule CRD defines PromQL-based alert expressions and
+     thresholds. Prometheus evaluates the rules and fires alerts, which
+     Alertmanager routes to Slack, email, or PagerDuty. An
+     AlertmanagerConfig CRD defines the routing.
+
+Q22: What is the difference between ServiceMonitor and PodMonitor?
+A22: ServiceMonitor has Prometheus discover targets via Kubernetes Service
+     endpoints. PodMonitor has Prometheus discover pods directly, which is
+     useful for headless services or pods without a Service.
+
+Q23: How do you trace a slow API request end-to-end?
+A23: A RequestIdMiddleware adds a unique trace ID to each request.
+     OpenTelemetry propagates this ID through FastAPI, and every
+     middleware logs its processing time. Querying Loki/Grafana by the
+     request ID traces the full path: ingress → middleware → router →
+     service → database.
+
+
+--------------------------------------------------------------------------------
+SECTION 5 — SECURITY
+--------------------------------------------------------------------------------
+
+Q24: How do you prevent privilege escalation in Kubernetes?
+A24: ClusterRole and ClusterRoleBinding are blocked by the custom
+     validator — only namespace-scoped Role/RoleBinding is allowed.
+     DaemonSet is also blocked, and root containers are disallowed by
+     platform standards.
+
+Q25: How do you handle secret sprawl?
+A25: The Secret resource type is restricted in the Kubernetes validator.
+     Teams must use the ExternalSecret CRD, with secrets synced from AWS
+     Secrets Manager — a single source of truth, with rotation handled at
+     the AWS level.
+
+Q26: What is defense-in-depth in Kubernetes?
+A26: Layer 1: Network Policies (pod-to-pod traffic rules)
+     Layer 2: SecurityGroupPolicy (AWS VPC security groups at the pod level)
+     Layer 3: IRSA (no static credentials, auto-rotating)
+     Layer 4: Kubernetes RBAC (namespace-scoped, AD group controlled)
+     Layer 5: SAST (Checkmarx One on every PR)
+     Layer 6: Private registry (Artifactory, not Docker Hub)
+
+Q27: What is a trust boundary in auth?
+A27: In this system, the ingress validates the Azure AD JWT token. Once
+     inside the cluster, the API trusts the injected headers (x-user-name,
+     x-user-groups, etc.). The trust boundary is the Kubernetes ingress —
+     internal pod-to-pod traffic is considered trusted, since pods cannot
+     spoof headers from outside the cluster.
+
+Q28: How do you scan for vulnerabilities in your pipelines?
+A28: Checkmarx One performs SAST (static code analysis) on every PR.
+     Dependabot handles automated dependency CVE alerts and PRs.
+     kubeconform validates Kubernetes manifest schemas, and Artifactory
+     serves as the private registry with vulnerability scanning.
+
+
+--------------------------------------------------------------------------------
+SECTION 6 — PLATFORM ENGINEERING
+--------------------------------------------------------------------------------
+
+Q29: What is an Internal Developer Platform (IDP)?
+A29: A self-service infrastructure platform for developers. Instead of
+     filing tickets, developers submit a PR with Kubernetes manifests. CI
+     validates standards, a bot auto-merges valid changes, and Argo CD
+     deploys them — with zero ops team involvement for standard
+     deployments.
+
+Q30: How do you enforce governance without slowing teams down?
+A30: Validation is automated in CI rather than done through manual review.
+     Standards are encoded as code in the validator, with fast feedback
+     given via PR comments and auto-approval on pass. Only truly invalid
+     manifests are blocked — valid ones auto-merge within minutes.
+
+Q31: What is a cost-center label used for?
+A31: It maps Kubernetes namespaces/workloads to business unit cost
+     centers. Cloud costs (EC2, RDS, S3) are tagged and allocated to the
+     owning team, enabling chargeback/showback reporting in FinOps
+     dashboards.
+
+Q32: How do you handle multiple environments (dev/qa/prd)?
+A32: Through separate directories (projects/dev/, projects/qa/,
+     projects/prd/) and separate clusters with separate Argo CD instances.
+     The validator is aware of which resource types are allowed per
+     environment — some resource types are only permitted in certain
+     environments.
+
+Q33: What is stale branch pruning?
+A33: An automated GitHub workflow that runs weekly and deletes branches
+     with no commits older than a defined cutoff (default 1 month, minimum
+     2 weeks). This keeps the repo clean, reduces confusion, and lowers
+     clone times.
+
+
+--------------------------------------------------------------------------------
+SECTION 7 — SYSTEM DESIGN
+--------------------------------------------------------------------------------
+
+Q34: Design a zero-downtime deployment system.
+A34: Use a rolling update strategy in Kubernetes. Define readiness
+     probes so new pods only receive traffic once healthy, and liveness
+     probes so unhealthy pods are auto-restarted. Use a
+     PodDisruptionBudget to ensure minimum availability. For higher-risk
+     changes, use blue-green or canary deployment via Argo Rollouts. Argo
+     CD shows a diff before syncing, and production changes can use
+     manual sync.
+
+Q35: Design a multi-tenant Kubernetes platform for 500+ teams.
+A35: Use namespace-per-team isolation with Argo CD RBAC scoped per
+     namespace via AD groups. Apply a ResourceQuota per namespace to
+     prevent noisy-neighbor issues, and a default-deny NetworkPolicy that
+     allows traffic only as needed. A custom validator enforces standards
+     on every PR, and teams self-serve via a Git PR workflow with no
+     tickets required. Cost is tracked via cost-center labels, and
+     ClusterRole is blocked — only namespace-scoped RBAC is permitted.
+
+Q36: How would you debug a pod that keeps CrashLoopBackOff?
+A36: Check crash logs with kubectl logs <pod> --previous. Review events
+     and exit codes with kubectl describe pod <pod>, and sort cluster
+     events with kubectl get events --sort-by=.lastTimestamp. Check
+     whether the liveness probe is too aggressive or misconfigured, check
+     resource limits for OOMKilled conditions, verify secrets/env vars are
+     present, and check whether the readiness probe is failing and causing
+     restarts.
+
+Q37: Design a secrets management system for Kubernetes.
+A37: Use AWS Secrets Manager as the central store. The ExternalSecret CRD
+     (via the External Secrets Operator) syncs secrets into Kubernetes
+     Secrets, with IRSA allowing the ExternalSecret operator to read from
+     AWS Secrets Manager. On rotation, AWS Secrets Manager rotates the
+     value, ESO polls and updates the Kubernetes Secret, and a wave
+     annotation on the Deployment auto-restarts pods when the secret
+     changes. No manual kubectl create secret is used, and no secrets are
+     ever committed to Git.
+
+Q38: Design observability for a microservices platform.
+A38: Metrics: a Prometheus ServiceMonitor per app feeds Prometheus, which
+     feeds Grafana.
+     Logs: an Alloy DaemonSet feeds Loki, which feeds Grafana.
+     Traces: an OpenTelemetry SDK feeds Tempo, which feeds Grafana.
+     Alerts: a PrometheusRule feeds Alertmanager, which routes to
+     Slack/PagerDuty.
+     Dashboards: Grafana supports drill-down from alert to metric to log
+     to trace, correlated via a common trace ID across all telemetry
+     signals.
+
+
+================================================================================
+END OF DOCUMENT
+================================================================================

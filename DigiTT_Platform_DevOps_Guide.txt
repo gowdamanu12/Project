@@ -1,0 +1,1222 @@
+================================================================================
+  DigiTT PLATFORM — COMPLETE DEVOPS GUIDE
+  Architecture | System Design | Project Intro | Interview Q&A
+  Target Audience: DevOps Engineer (4–5 years experience)
+================================================================================
+
+TABLE OF CONTENTS
+-----------------
+1.  Project Introduction
+2.  Architecture Diagram (ASCII)
+3.  System Design (Detailed)
+4.  Infrastructure Deep-Dive
+5.  CI/CD Pipeline Design
+6.  Security Design
+7.  Observability & Monitoring
+8.  Interview Q&A — DevOps Engineer (4–5 yrs)
+    8.1  AWS & Cloud Infrastructure
+    8.2  Docker & Containers
+    8.3  ECS Fargate
+    8.4  CI/CD & GitHub Actions
+    8.5  CloudFormation & IaC
+    8.6  Networking & Security
+    8.7  Databases & Storage
+    8.8  Airflow / Orchestration
+    8.9  General DevOps Principles
+    8.10 Scenario-Based Questions
+
+================================================================================
+1. PROJECT INTRODUCTION
+================================================================================
+
+NAME: DigiTT (Digital Technology Transfer)
+ORGANIZATION: Eli Lilly and Company (LRL — Lilly Research Laboratories)
+
+WHAT IS IT?
+DigiTT is an internal web platform for managing bioprocess technology transfer.
+In pharmaceutical manufacturing, "technology transfer" means moving a drug
+production process from R&D labs to manufacturing facilities. DigiTT digitizes
+this process by:
+
+  - Storing and parsing complex recipe documents (Word/Excel files describing
+    manufacturing steps for biologics like mAbs, RNA, etc.)
+  - Planning manufacturing campaigns: scheduling which bioreactors to use,
+    which chromatography steps, filtration, buffer preparation, etc.
+  - Calculating Bill of Materials (BOM) — how much buffer, resin, filters,
+    equipment are needed for each campaign
+  - Managing equipment selection and process unit operations
+  - Providing a collaborative interface for scientists and process engineers
+
+BUSINESS DOMAINS:
+  - Recipe Management: capturing process knowledge from lab-scale recipes
+  - Campaign Planning: scheduling and resource planning for manufacturing runs
+  - Material/Buffer Management: quantity calculations for procurement
+  - Equipment Configuration: matching the right equipment to each process step
+
+USERS:
+  - Process scientists
+  - Manufacturing engineers
+  - Campaign planners
+  - BOM coordinators
+
+DATA CLASSIFICATION: Red (sensitive internal pharmaceutical data)
+
+ENVIRONMENTS:
+  - DEV:  digitt-d.lilly.com   / digitt-api-d.lilly.com
+  - QA:   digitt-q.lilly.com   / digitt-api-q.lilly.com
+  - PROD: digitt.lilly.com     / digitt-api.lilly.com
+
+================================================================================
+2. ARCHITECTURE DIAGRAM (ASCII)
+================================================================================
+
+  USERS (Scientists / Engineers)
+          |
+          | HTTPS (TLS 1.3)
+          v
+  +-------------------------------------------+
+  |   AWS Application Load Balancer (ALB)     |
+  |   lrl-prd-digitt-alb-ui-service           |
+  |   Port 443 — Health check /health         |
+  +-------------------------------------------+
+          |
+          | Route: /digitt-ui  or  /digitt-v4
+          v
+  +-------------------------------------------------------+
+  |  ECS Fargate — Frontend Service                       |
+  |  lrl-prd-digitt-wbwd-service-frontend                 |
+  |  Image: Node.js 20-alpine (Next.js 16)                |
+  |  2 vCPU / 4 GB RAM — Port 8080                        |
+  |  ReadOnly rootfs | Non-root (uid 10001)               |
+  +-------------------------------------------------------+
+          |                        |
+    REST  |                GraphQL | Apollo Client
+          |                        |
+  +-------+------------------------+---------+
+  |                                          |
+  v                                          v
+  +---------------------------+    +---------------------------+
+  |  ALB — Backend            |    |  ALB — Campaign Planner   |
+  |  lrl-prd-digitt-alb-ecs   |    |  (same ALB, diff route)   |
+  |  Route: /api              |    |  Route: /campaign         |
+  +---------------------------+    +---------------------------+
+          |                                  |
+          v                                  v
+  +-------------------------+    +----------------------------+
+  |  ECS Fargate            |    |  ECS Fargate               |
+  |  Recipe Manager         |    |  Campaign Planner          |
+  |  (Python FastAPI)       |    |  (Python FastAPI)          |
+  |  Port 8080              |    |  Port 8080                 |
+  |  2 vCPU / 4 GB          |    |  2 vCPU / 4 GB             |
+  +-------------------------+    +----------------------------+
+          |         |                    |         |
+          |         +--------------------+         |
+          |         |   HTTP REST calls            |
+          |         v                              |
+          |   +-----------+                        |
+          |   | Secrets   |                        |
+          |   | Manager   |<-----------------------+
+          |   +-----------+  (DB creds, API keys)
+          |
+    +-----+------+------------------+
+    |            |                  |
+    v            v                  v
++--------+  +--------+     +-------------------+
+|  RDS   |  |  S3    |     |  DynamoDB         |
+| Postgres|  | Bucket |     | Status Tables     |
+| (async) |  | Docs   |     | (recipe + campaign)|
++--------+  +--------+     +-------------------+
+
+  ASYNC PROCESSING:
+  +---------------------------------------------------+
+  |  AWS MWAA (Managed Apache Airflow)               |
+  |  DAG: digitt-recipe-manager-v1 / v2              |
+  |    Step 1: recipe_parser task                    |
+  |      -> triggers ECS Task (rm-parser service)    |
+  |      -> reads S3: documents/{id}/raw/            |
+  |      -> writes S3: documents/{id}/processed/     |
+  |    Step 2: rm-process-stages                     |
+  |    Step 3: rm-unitops-params                     |
+  +---------------------------------------------------+
+          |
+          v
+  +----------------------------+
+  |  ECS Tasks (one-off runs)  |
+  |  - rm-parser               |
+  |  - rm-conversion           |
+  |  - rm-process-stages       |
+  |  - rm-unitops-params       |
+  +----------------------------+
+
+  OBSERVABILITY:
+  +-------------------+   +-------------------+
+  | CloudWatch Logs   |   | OpenSearch         |
+  | (ECS + Airflow)   |   | (vector search +   |
+  |                   |   |  log aggregation)  |
+  +-------------------+   +-------------------+
+
+  AUTH LAYER:
+  +---------------------------------------------+
+  |  Azure MSAL (Microsoft Entra / Azure AD)    |
+  |  Frontend: MSAL React — acquires tokens     |
+  |  Backend: X-API-Key header middleware       |
+  +---------------------------------------------+
+
+  CI/CD:
+  +--------------------------------------------------+
+  |  GitHub Actions (per repo)                      |
+  |  OIDC → IAM Role (no long-lived credentials)    |
+  |  dev push  → DEV AWS account                    |
+  |  qa push   → QA  AWS account                    |
+  |  main push → PROD AWS account                   |
+  |                                                  |
+  |  Steps:                                          |
+  |  1. Assume IAM Role via OIDC                     |
+  |  2. Authenticate to JFrog Artifactory            |
+  |  3. Build Docker image with BuildKit secrets     |
+  |  4. Push to ECR (immutable tags)                 |
+  |  5. Register new ECS Task Definition             |
+  |  6. Update ECS Service (rolling deploy)          |
+  +--------------------------------------------------+
+
+================================================================================
+3. SYSTEM DESIGN (DETAILED)
+================================================================================
+
+3.1 REPOSITORIES (Monorepo workspace, 4 repos)
+------------------------------------------------
+  lrl-prd-digitt-backend/         Recipe Manager service
+  lrl-prd-digitt-campaign-planner/ Campaign Planner service
+  lrl-prd-digitt-frontend/        Next.js UI
+  lrl-prd-digitt-infra/           CloudFormation IaC
+
+3.2 FRONTEND DESIGN
+--------------------
+Framework:    Next.js 16 with App Router (server + client components)
+Language:     TypeScript 5
+UI Kit:       Material-UI 7 + Lilly UX LDS (internal design system) + Tailwind CSS
+State Mgmt:   Zustand (lightweight global state)
+GraphQL:      Apollo Client 3 (queries + mutations)
+REST:         Axios for file uploads and event calls
+Auth:         Azure MSAL React — users authenticate with Microsoft Entra (SSO)
+Routing:      app/[team]/ — team-scoped dynamic routing
+WebSocket:    Real-time updates from Recipe Manager backend
+
+Key components:
+  - DragDropFiles.tsx          — recipe file upload
+  - ProcessStepManager.tsx     — unit operation editing
+  - EquipmentSelectionModal.tsx — equipment assignment
+  - CampaignPlannerDragDropFiles.tsx — campaign file upload
+  - AlertModal / ConfirmationModal  — global modal system
+
+3.3 BACKEND DESIGN — RECIPE MANAGER
+-------------------------------------
+Language:    Python 3.13
+Framework:   FastAPI 0.135.0 + Uvicorn 0.34.2 (ASGI)
+ORM:         SQLModel 0.0.24 (Pydantic + SQLAlchemy 2.0)
+Database:    PostgreSQL (async: asyncpg, schema: recipe_management)
+GraphQL:     Strawberry GraphQL (endpoint: POST /v1/recipe)
+Auth:        X-API-Key middleware (all routes protected)
+AWS:         boto3 (S3 for docs, Secrets Manager for creds)
+
+Data Models (SQLModel tables in recipe_management schema):
+  - Molecule, Department
+  - Project, Campaign, SyntheticRoute, SyntheticRouteSteps
+  - ProcessRecipe, ProcessRecipeStage
+  - ProcessRecipeUnitOp, ProcessRecipeParameter
+  - Documents
+
+REST API Routes:
+  GET  /health              — health check
+  POST /files/*             — recipe/document uploads to S3
+  GET/POST /data/*          — recipe CRUD
+  GET/POST /materials/*     — material/molecule management
+  POST /event/*             — parsing status callbacks
+  WS   /websocket/*         — real-time progress updates
+
+3.4 BACKEND DESIGN — CAMPAIGN PLANNER
+---------------------------------------
+Language:    Python 3.13
+Framework:   FastAPI + Uvicorn
+ORM:         SQLModel (schema: campaign_planner)
+GraphQL:     Strawberry (endpoint: POST /v1/gpql)
+               DataLoader pattern to avoid N+1 queries:
+               - StagesByCampaignLoader
+               - UnitOpsByStageLoader
+               - BuffersByIdLoader
+               - EquipmentByIdLoader
+               - CampaignBufferQuantitiesByCampaignLoader
+
+Data Models (campaign_planner schema):
+  - Campaign, ProcessStage, ProcessUnitOp, ProcessUnitOpParams
+  - CampaignType, ProcessingArea
+  - ProcessStageInput, CampaignStageOutput
+  - Reference tables: RefProcessStage, RefProcessUnitOp, etc.
+  - Equipment: Skid, Resin, Filter, Tanks, Equipment
+  - Buffer, Material, CampaignMaterial, CampaignBufferQuantity
+  - StageBufferOutputDetails, UnitopBufferOutputDetails
+  - CampaignOutput, CampaignEpcPoolRun
+
+REST API Routes:
+  GET  /health
+  POST /v1/files/*          — file uploads
+  POST /v1/calculations/*   — chromatography, TFF, nanofiltration calculations
+  POST /v1/bom_calc/*       — Bill of Materials calculations
+  POST /v1/copy_edit/*      — copy/edit campaign operations
+  POST /v1/event/*          — event tracking
+  POST /v1/epc/*            — Equipment Parameter Configuration
+
+Calculation Engine (services/unitop/app/out/):
+  - chrom.py                — chromatography step calculations
+  - buffer/buffer_calc.py   — buffer volume calculations
+  - stage/output.py         — stage output metrics
+  - campaign.py             — campaign-level aggregations
+  - repository.py           — equipment selection logic
+  - runnable.py             — step execution orchestrator
+
+3.5 DATABASE DESIGN
+---------------------
+Type:    PostgreSQL (AWS RDS)
+Schemas: Two isolated schemas on same instance
+  - recipe_management    (Recipe Manager service)
+  - campaign_planner     (Campaign Planner service)
+
+Connection Pooling:
+  - pool_size: 100
+  - max_overflow: 200
+  - async via asyncpg
+
+Credentials: Retrieved from AWS Secrets Manager at container startup
+  Keys: username, password, host, port, dbname
+
+Additional Storage:
+  DynamoDB Tables (PAY_PER_REQUEST, PITR enabled):
+  - lrl-prd-digitt-recipe-manager-status-table
+    PK: process_recipe_id (S), SK: task_name (S)
+    GSI: Created_byIndex (created_by)
+  - lrl-prd-digitt-campaign-planner-status-table
+    PK: campaign_id (S)
+
+3.6 OBJECT STORAGE — S3
+------------------------
+  Bucket naming: lly-lrl-prd-digitt-*
+
+  Path structure:
+    documents/{document_uuid}/raw/{filename}          — original uploaded file
+    documents/{document_uuid}/processed/{file}_parsed.json — Airflow output
+    bom_exports/...                                   — BOM calculation exports
+
+3.7 ASYNC PROCESSING — AIRFLOW + ECS
+--------------------------------------
+  Workflow (example: recipe parsing):
+  1. User uploads a Word/Excel recipe file via frontend
+  2. File stored to S3: documents/{id}/raw/{file}
+  3. REST call to /event to register processing request in DynamoDB
+  4. Airflow DAG (digitt-recipe-manager-v1) triggered with:
+       { process_recipe_id: "...", username: "..." }
+  5. Task: recipe_parser
+     - Reads document metadata from RDS
+     - Constructs S3 source path
+     - Triggers ECS one-off task: rm-parser container
+     - Monitors task completion via ECS API
+  6. ECS rm-parser task:
+     - Reads raw file from S3
+     - Uses LLM / rule-based parsing to extract recipe sections
+     - Writes parsed JSON to S3: documents/{id}/processed/
+  7. Subsequent Airflow tasks:
+     - rm-process-stages: reads parsed JSON, inserts ProcessRecipeStage rows
+     - rm-unitops-params: reads parsed JSON, inserts unit op parameters
+  8. Status callbacks to /event endpoint
+  9. Frontend receives real-time updates via WebSocket
+
+3.8 OPENSEARCH VECTOR SEARCH
+------------------------------
+  Collection: lrl-prd-digitt-wbwd-collection
+  Type: VECTORSEARCH (semantic search over recipe content)
+  Network: Public (Lilly IP-restricted via ALB/SG)
+  Access Roles:
+    - lrl_prd_digitt_ecs_task_role
+    - lrl_prd_digitt_lambda_service_role
+    - lrl_prd_digitt_glue_service_role
+
+================================================================================
+4. INFRASTRUCTURE DEEP-DIVE
+================================================================================
+
+4.1 ECS FARGATE CLUSTER
+------------------------
+Cluster name: lrl-prd-digitt-wbwd-ecs-cluster
+
+Services:
+  SERVICE NAME                                    ROUTE     REPO
+  lrl-prd-digitt-wbwd-service-middleware          /api      lrl-prd-digitt-backend
+  lrl-prd-digitt-wbwd-service-campaign-planner    /campaign lrl-prd-digitt-campaign-planner
+  lrl-prd-digitt-wbwd-service-frontend            /digitt-ui lrl-prd-digitt-frontend
+  lrl-prd-digitt-wbwd-service-frontend-v4         /digitt-v4 lrl-prd-digitt-frontend
+
+Task Definitions:
+  lrl-prd-digitt-wbwd-rm-parser                   (async task, Airflow-triggered)
+  lrl-prd-digitt-wbwd-rm-conversion               (async task)
+
+Task Definition Configuration:
+  CPU:          2048 units (2 vCPU) — scalable to 8192
+  Memory:       4096 MB (4 GB)
+  Network Mode: awsvpc (each task gets own ENI)
+  Container:
+    Port:             8080
+    ReadonlyRootFilesystem: true
+    User:             10001 (non-root, app user)
+    MountPoints:      none (no persistent volume)
+    Tmpfs:            /tmp, 512 MB, rw, noexec, nosuid
+  Log Driver:   awslogs → CloudWatch
+
+4.2 APPLICATION LOAD BALANCERS
+--------------------------------
+  ALB 1: lrl-prd-digitt-alb-ecs-service    (Backend APIs)
+  ALB 2: lrl-prd-digitt-alb-ui-service     (Frontend)
+
+  Both ALBs:
+    Protocol:           HTTPS, Port 443, TLS 1.3
+    Health check:       /health, every 30s, timeout 10s
+    Healthy threshold:  2 consecutive checks
+    Idle timeout:       4000 seconds
+
+4.3 NETWORKING
+---------------
+  VPC:   Lilly enterprise VPC (shared)
+  Subnets: Private (ECS tasks), Public (ALB)
+
+  Security Groups:
+    lrl-prd-digitt-alb-v1-sg:
+      Inbound:  All from Lilly IP Prefix List (internal-only access)
+      Outbound: All
+
+    lrl-prd-digitt-v1-sg (ECS service):
+      Inbound:  All from ALB SG (alb-v1-sg)
+      Outbound: All (0.0.0.0/0) — for RDS, S3, Secrets Manager
+
+    lrl-prd-digitt-v1-rds-access-sg:
+      Inbound:  TCP 5432 from Lilly Prefix List
+      Outbound: All
+
+    AWSMWAASecurityGroup:
+      Inbound:  All (self-referencing — MWAA internal communication)
+      Outbound: All (self-referencing)
+
+4.4 CERTIFICATES & DOMAINS
+----------------------------
+  Certificates managed by GitHub Actions (infra repo):
+  ENV   BACKEND DOMAIN             FRONTEND DOMAIN
+  dev   digitt-api-d.lilly.com     digitt-d.lilly.com
+  qa    digitt-api-q.lilly.com     digitt-q.lilly.com
+  prod  digitt-api.lilly.com       digitt.lilly.com
+
+  Cert sources: repo variables (CERT_PEM, PRIVATE_KEY_PEM, CA_BUNDLE)
+  Imported to AWS ACM
+
+4.5 IAM ROLES & POLICIES
+--------------------------
+  ECS Task Execution Role: lrl_prd_digitt_ecs_task_execution_role
+    - CloudWatch Logs: CreateLogGroup, CreateLogStream, PutLogEvents
+    - ECR: GetAuthorizationToken, BatchGetImage, GetDownloadUrlForLayer
+    - ALB: RegisterTargets
+    - S3: PutObject on lly-lrl-prd-digitt-*/*
+
+  ECS Task Role: lrl_prd_digitt_ecs_task_role
+    - execute-api:Invoke
+    - lambda:InvokeFunction
+    - SES: SendEmail, SendRawEmail
+    - CloudWatch Logs: CreateExportTask, DescribeExportTasks, DescribeLogGroups/Streams
+    - S3: GetObject, GetBucketAcl, GetObjectAcl, GetObjectVersion
+    - Secrets Manager: GetSecretValue (for DB creds)
+    - DynamoDB: PutItem, GetItem, UpdateItem (status tables)
+
+  GitHub Actions Deployment Role: iamGHARole
+    - CloudFormation: CreateStack, UpdateStack on lrl-prd-digitt-* stacks
+    - ECR: BatchCheckLayerAvailability, PutImage, InitiateLayerUpload
+    - ECS: RegisterTaskDefinition, UpdateService, DescribeServices
+    - EC2: DescribeVpcs, DescribeSubnets, DescribeSecurityGroups
+
+================================================================================
+5. CI/CD PIPELINE DESIGN
+================================================================================
+
+5.1 PIPELINE OVERVIEW
+-----------------------
+  Tool:       GitHub Actions
+  Auth:       OIDC (no static AWS access keys in secrets)
+  Strategy:   Branch = Environment
+    dev   branch → DEV  account
+    qa    branch → QA   account
+    main  branch → PROD account
+
+  Repos with pipelines:
+    lrl-prd-digitt-backend/          .github/workflows/deploy.yml
+    lrl-prd-digitt-campaign-planner/ .github/workflows/deploy.yml
+    lrl-prd-digitt-frontend/         .github/workflows/deploy.yml
+    lrl-prd-digitt-infra/            .github/workflows/deploy.yml
+    lrl-prd-digitt-backend/          .github/workflows/unit_test.yml
+    lrl-prd-digitt-backend/          .github/workflows/checkmarx-one.yml
+    lrl-prd-digitt-frontend/         .github/workflows/pr-validation.yml
+
+5.2 BACKEND DEPLOY PIPELINE (DETAILED)
+----------------------------------------
+Trigger: push to dev / qa / main
+
+Step 1:  Checkout code (actions/checkout)
+Step 2:  Set environment variables per branch
+           AWS_ACCOUNT_ID, AWS_REGION=us-east-2
+           ECR_REGISTRY, SERVICE_NAME
+Step 3:  Configure AWS credentials via OIDC
+           role-to-assume: ${{ vars.DEPLOYMENT_ROLE }}
+           aws-region: us-east-2
+Step 4:  Authenticate to JFrog Artifactory (private PyPI)
+Step 5:  Authenticate to ECR
+           aws ecr get-login-password | docker login
+Step 6:  Build Docker image with BuildKit secrets
+           docker build \
+             --secret id=artifactory_user,env=ARTIFACTORY_USER \
+             --secret id=artifactory_token,env=ARTIFACTORY_TOKEN \
+             -t $ECR_REGISTRY/$SERVICE_NAME:$IMAGE_TAG .
+           IMAGE_TAG format:
+             {service}-{env}-{git_short_sha}-run{run_number}-a{attempt}
+Step 7:  Push image to ECR
+Step 8:  Check if ECS service exists
+           aws ecs describe-services ...
+Step 9:  Fetch current task definition JSON
+           aws ecs describe-task-definition ...
+Step 10: Patch task definition
+           - Update container image URL
+           - Set ReadonlyRootFilesystem: true
+           - Set User: "10001"
+           - Remove old mount points
+           - Add Tmpfs: /tmp (512 MB, rw, noexec, nosuid)
+Step 11: Register new task definition revision
+           aws ecs register-task-definition ...
+Step 12: Update ECS service to use new task definition
+           aws ecs update-service --force-new-deployment
+
+5.3 FRONTEND DEPLOY PIPELINE (DIFFERENCES)
+--------------------------------------------
+Additional steps:
+  - Set up .npmrc with JFrog Artifactory for private npm packages
+  - Pass build args to Docker:
+      NEXT_PUBLIC_MSAL_CLIENT_ID
+      NEXT_PUBLIC_MSAL_TENANT_ID
+      NEXT_PUBLIC_API_URL
+      NEXT_PUBLIC_BASE_PATH
+  - Retrieve API key from Secrets Manager for runtime injection
+
+5.4 UNIT TEST PIPELINE
+-----------------------
+Trigger: push/PR to dev
+
+Step 1:  Python 3.13 setup
+Step 2:  Restore pip cache
+Step 3:  Install: requirements.txt + pytest + pytest-cov + moto
+           (moto = AWS service mocking for tests)
+Step 4:  Set PYTHONPATH = "middleware:shared"
+Step 5:  Run: pytest -v middleware/tests/
+Step 6:  Generate HTML coverage report
+Step 7:  Upload artifacts (coverage report)
+
+5.5 SECURITY SCANNING
+-----------------------
+Tool:     Checkmarx One (SAST)
+Trigger:  PR, manual dispatch
+Workflow: Reusable from EliLillyCo/.github org-level workflow
+Secrets:  CX_CLIENT_ID, CX_CLIENT_SECRET
+
+5.6 FRONTEND PR VALIDATION
+----------------------------
+Trigger: PR on any branch
+Steps:
+  1. Node 18 setup + npm cache
+  2. .npmrc config for JFrog Artifactory
+  3. npm install
+  4. Lint (optional)
+  5. Unit tests (optional)
+  6. Comment PR with workflow status
+
+5.7 INFRA DEPLOY PIPELINE
+---------------------------
+Trigger: push to dev / qa / main
+
+Job 1: Infra Certificates
+  - Check existing certs in ACM by domain
+  - If missing: import cert from repo variables
+    (CERT_PEM, PRIVATE_KEY_PEM, CA_BUNDLE → aws acm import-certificate)
+
+Job 2: CloudFormation Stack Deploys
+  - sam deploy or cloudformation deploy
+  - Stacks (in order):
+    1. Networking / Security Groups
+    2. IAM Roles & Policies
+    3. ECR Repositories
+    4. ECS Cluster
+    5. ALBs
+    6. ECS Services / Task Definitions
+    7. DynamoDB Tables
+    8. OpenSearch Serverless
+    9. MWAA Foundation
+
+================================================================================
+6. SECURITY DESIGN
+================================================================================
+
+6.1 CONTAINER SECURITY
+------------------------
+  - Base image: python:3.13-slim / node:20-alpine (minimal attack surface)
+  - OS patches applied in Dockerfile for known CVEs:
+      openssl, libssl3, perl, tar, minimatch, glob, cross-spawn, undici
+  - BuildKit --secret: Artifactory credentials never baked into image layers
+  - Non-root user: uid/gid 10001 (created as "app" user in Dockerfile)
+  - Read-only root filesystem: /tmp is the only writable path
+  - Tmpfs /tmp: noexec, nosuid flags prevent code execution from /tmp
+  - ECR image tag: IMMUTABLE (prevents accidental tag overwrites)
+
+6.2 NETWORK SECURITY
+---------------------
+  - All user traffic over HTTPS with TLS 1.3
+  - ALB accessible only from Lilly corporate IP Prefix List (not public internet)
+  - ECS tasks in private subnets — no direct inbound internet access
+  - ECS security group: only accepts traffic from ALB security group
+  - RDS security group: only accepts port 5432 from Lilly Prefix List
+
+6.3 SECRETS MANAGEMENT
+------------------------
+  - Zero hardcoded credentials in code or Docker images
+  - All secrets in AWS Secrets Manager
+  - Retrieved at container startup via shared/utils/set_env.py
+  - DB password, API keys, Azure tenant/client IDs all in Secrets Manager
+  - GitHub Actions uses OIDC (no long-lived AWS_ACCESS_KEY_ID in GitHub secrets)
+
+6.4 APPLICATION-LEVEL AUTH
+----------------------------
+  Frontend: Azure MSAL (Microsoft Entra SSO)
+    - Users login with Lilly corporate credentials
+    - MSAL acquires JWT token
+    - Token passed to backend APIs
+
+  Backend: X-API-Key middleware
+    - All routes protected by API key header: X-API-Key
+    - Key retrieved from Secrets Manager
+
+6.5 DATA SECURITY
+------------------
+  - Data Classification: Red (highest sensitivity tier at Lilly)
+  - HIPAA: No
+  - DynamoDB PITR: enabled (point-in-time recovery)
+  - OpenSearch: AWS-owned KMS encryption
+  - MWAA: Customer-managed KMS key for data encryption
+
+6.6 CODE SECURITY
+------------------
+  - Checkmarx One SAST on every PR
+  - Org-level reusable workflow (EliLillyCo/.github)
+  - PYTHONPATH isolation in test runner
+
+================================================================================
+7. OBSERVABILITY & MONITORING
+================================================================================
+
+7.1 LOGGING
+------------
+  Application:
+    - Python services use structlog (structured JSON logging)
+    - Logs collected by ECS awslogs driver → CloudWatch Log Groups
+    - Log group naming: /ecs/{service-name}
+
+  Airflow:
+    - MWAA console provides DAG run logs
+    - Task logs → CloudWatch via MWAA integration
+
+7.2 METRICS
+------------
+  CloudWatch:
+    - ECS CPU/Memory utilization per service
+    - ALB request count, latency, 4xx/5xx error rates
+    - DynamoDB consumed RCU/WCU
+    - RDS CPU, connections, storage
+
+7.3 SEARCH & ANALYTICS
+------------------------
+  OpenSearch Serverless:
+    - Collection type: VECTORSEARCH
+    - Used for: recipe content semantic search + log aggregation
+    - Ingestion: via lrl_prd_digitt_lambda_service_role / Glue jobs
+
+7.4 ALERTING
+-------------
+  EventBridge Rule (aws-mwaa-vpce-rule):
+    - Triggers on MWAA Environment Status Change
+    - Target: mwaa-receiver-bus (for downstream alerting)
+
+7.5 AUDIT
+----------
+  AWS CloudTrail:
+    - All AWS API calls logged for compliance
+    - Supports forensic analysis and incident response
+
+================================================================================
+8. INTERVIEW Q&A — DEVOPS ENGINEER (4–5 YEARS EXPERIENCE)
+================================================================================
+
+--------------------------------------------------------------------------------
+8.1 AWS & CLOUD INFRASTRUCTURE
+--------------------------------------------------------------------------------
+
+Q1. How do you manage multi-environment deployments on AWS (dev/qa/prod)?
+
+A: In this project, we use a branch-based strategy where each Git branch maps to
+   an AWS account. "dev" branch deploys to the dev AWS account, "qa" to QA, and
+   "main" to production. Each environment has its own account ID stored as a
+   GitHub Actions variable. The same CloudFormation templates and Docker images
+   are used, with environment-specific configuration injected at deploy time
+   (different MSAL client IDs, API URLs, domain names).
+
+   This gives full environment isolation — a bad deployment to QA cannot affect
+   production resources.
+
+Q2. What is OIDC in GitHub Actions and why is it better than static credentials?
+
+A: OIDC (OpenID Connect) allows GitHub Actions to assume an AWS IAM role
+   without storing long-lived access keys. The workflow requests a short-lived
+   token from GitHub's OIDC provider, which AWS IAM validates and exchanges for
+   temporary STS credentials. These credentials expire after the job.
+
+   Benefits:
+   - No AWS_ACCESS_KEY_ID / AWS_SECRET_ACCESS_KEY in GitHub secrets
+   - Credentials auto-expire (typically 1 hour)
+   - Each repo/branch can be restricted to specific IAM roles
+   - Audit trail via CloudTrail shows exactly which GitHub job assumed which role
+
+   In DigiTT, the IAM role is configured with a trust policy that restricts
+   which GitHub repo and branch can assume it.
+
+Q3. How does AWS Secrets Manager work in this project?
+
+A: At container startup, the Python utility shared/utils/set_env.py calls
+   boto3's get_secret_value() to fetch a JSON blob from Secrets Manager. It
+   unpacks the keys (DB host, port, username, password, dbname) into environment
+   variables. FastAPI then reads those env vars via Pydantic Settings.
+
+   This means no credentials are baked into the Docker image or passed as
+   ECS task definition environment variables (which would be visible in the
+   AWS console). The ECS task role has Secrets Manager GetSecretValue
+   permission scoped to only the relevant secret ARN.
+
+Q4. What is the difference between ECS Task Execution Role and ECS Task Role?
+
+A: Task Execution Role: Used by the ECS agent/control plane to:
+     - Pull the Docker image from ECR
+     - Write logs to CloudWatch
+     - Read secrets for injection into environment variables
+   This role is assumed by the ECS service, not your application code.
+
+   Task Role: Assumed by the application code running inside the container.
+     - Allows the app to call AWS services: S3 GetObject, Secrets Manager
+       GetSecretValue, DynamoDB PutItem, SES SendEmail, etc.
+   This is the role your Python boto3 calls use at runtime.
+
+Q5. What is AWS MWAA and why use it instead of self-managed Airflow?
+
+A: AWS MWAA (Managed Workflows for Apache Airflow) is a fully managed Airflow
+   service. It handles Airflow scheduler, webserver, and worker provisioning,
+   scaling, patching, and HA.
+
+   Benefits vs self-managed:
+   - No EC2/EKS cluster to maintain
+   - Auto-scaling workers
+   - IAM-integrated authentication
+   - Integrated with CloudWatch, S3 (for DAG storage and logs)
+   - KMS encryption support
+
+   In DigiTT, MWAA runs the recipe parsing DAGs. Long-running parsing tasks
+   are offloaded to ECS one-off tasks to avoid blocking Airflow workers.
+
+--------------------------------------------------------------------------------
+8.2 DOCKER & CONTAINERS
+--------------------------------------------------------------------------------
+
+Q6. Explain the multi-stage Docker build used in the frontend.
+
+A: The frontend Dockerfile has three stages:
+   1. base: Node 20-alpine, security patches applied (CVE fixes for openssl,
+      undici, minimatch, glob, cross-spawn, tar, npm).
+   2. deps: Copies package.json files, installs all dependencies
+      (npm ci) from JFrog Artifactory.
+   3. builder: Copies source, receives NEXT_PUBLIC_* build args, runs
+      npm run build to produce the Next.js .next folder.
+   4. runner: Copies only the built artifacts from builder + node_modules
+      from deps. Sets NODE_ENV=production.
+
+   Benefits: Final image only contains runtime code, not build tools or
+   dev dependencies. Smaller image = faster pulls, smaller attack surface.
+
+Q7. How do you pass secrets into Docker builds without leaking them?
+
+A: Using Docker BuildKit's --secret flag:
+     docker build \
+       --secret id=artifactory_user,env=ARTIFACTORY_USER \
+       --secret id=artifactory_token,env=ARTIFACTORY_TOKEN \
+       -t myimage .
+
+   In the Dockerfile, secrets are mounted at build time:
+     RUN --mount=type=secret,id=artifactory_user \
+         --mount=type=secret,id=artifactory_token \
+         pip install -r requirements.txt
+
+   The secret values are accessible under /run/secrets/ during that RUN step
+   but are NOT written to the image filesystem or any layer. They do not
+   appear in docker history or image inspect output.
+
+Q8. Why run containers as non-root user (uid 10001)?
+
+A: By default, Docker containers run as root. If a vulnerability allows
+   container escape, the attacker gains root on the host. Running as a
+   non-root user (uid 10001) limits:
+   - Privilege escalation within the container
+   - Ability to modify system files even inside the container
+   - Combined with ReadonlyRootFilesystem, the container cannot write to
+     any path except /tmp, which has noexec and nosuid flags
+
+   ECS task definition enforces this via:
+     "user": "10001"
+     "readonlyRootFilesystem": true
+     "linuxParameters": { "tmpfs": [{ "containerPath": "/tmp",
+       "mountOptions": ["rw","noexec","nosuid"], "size": 512 }] }
+
+Q9. What is ECR image tag immutability and why enable it?
+
+A: When tag immutability is enabled on an ECR repository, you cannot push
+   a new image with the same tag as an existing image. This prevents accidental
+   (or malicious) overwriting of existing images.
+
+   In DigiTT, tags include the Git SHA and run number:
+     {service}-{env}-{git_sha}-run{run_number}-a{attempt}
+   This makes every image uniquely traceable to a specific Git commit and
+   pipeline run. If you need to roll back, you know exactly which tag to use.
+
+--------------------------------------------------------------------------------
+8.3 ECS FARGATE
+--------------------------------------------------------------------------------
+
+Q10. How does a rolling deployment work with ECS Fargate?
+
+A: When you call "aws ecs update-service --force-new-deployment":
+   1. ECS scheduler starts new tasks with the new task definition revision
+   2. New tasks are registered with the ALB target group
+   3. ALB waits for health checks to pass on new tasks (/health endpoint)
+   4. Once healthy, ALB starts routing traffic to new tasks
+   5. ECS drains connections from old tasks and deregisters them from ALB
+   6. Old tasks are stopped
+
+   This achieves zero-downtime deployment. The deployment circuit breaker
+   can be configured to automatically roll back if new tasks fail to start
+   or fail health checks.
+
+Q11. What is the difference between ECS Service and ECS Task?
+
+A: ECS Service: Long-running, keeps N copies of a task running continuously.
+   If a task crashes, the service restarts it. Used for web servers, APIs.
+   Supports ALB integration, auto-scaling, rolling deployments.
+
+   ECS Task: One-off execution. Runs a container, does its work, exits.
+   No auto-restart. Used for batch jobs, data processing pipelines.
+   In DigiTT, rm-parser and rm-conversion are one-off tasks triggered by Airflow.
+
+Q12. How does awsvpc networking mode work in ECS?
+
+A: In awsvpc mode, each ECS task gets its own Elastic Network Interface (ENI)
+   with a private IP address from your VPC subnet. This means:
+   - Each task has its own security group membership
+   - Traffic to/from the task uses VPC routing (no NAT or shared ENI)
+   - You can apply fine-grained security group rules per task
+   - Tasks can communicate with other VPC resources using private IPs
+
+   This is the only network mode supported on Fargate (no host/bridge mode).
+
+--------------------------------------------------------------------------------
+8.4 CI/CD & GITHUB ACTIONS
+--------------------------------------------------------------------------------
+
+Q13. How do you prevent a bad deployment from reaching production?
+
+A: Multi-layered protection:
+   1. Branch protection: PRs required to merge to qa/main (no direct push)
+   2. PR validation: Checkmarx SAST scan + unit tests must pass
+   3. Sequential environments: Code goes dev → qa → main. A bug caught in QA
+      never makes it to prod.
+   4. Immutable image tags: You know exactly which commit is in prod
+   5. ECS deployment circuit breaker: Auto-rolls back if health checks fail
+   6. Manual approval gates can be added for production deployments
+
+Q14. How do you handle different environment configurations in GitHub Actions?
+
+A: Environment detection based on branch name using if conditions:
+     - if: github.ref == 'refs/heads/dev'   → set DEV variables
+     - if: github.ref == 'refs/heads/qa'    → set QA variables
+     - if: github.ref == 'refs/heads/main'  → set PROD variables
+
+   Variables include: AWS_ACCOUNT_ID, MSAL_CLIENT_ID, MSAL_TENANT_ID,
+   API_URL, AD_GROUP_IDs.
+
+   Sensitive values (account IDs, client IDs) stored as GitHub Actions
+   Variables (vars.*) not secrets, since they're not credentials per se.
+   Actual secrets (DEPLOYMENT_ROLE ARN, Artifactory tokens, Checkmarx keys)
+   stored as GitHub Actions Secrets (secrets.*).
+
+Q15. How does JFrog Artifactory fit into the pipeline?
+
+A: Lilly hosts a private JFrog Artifactory instance that proxies public
+   package registries (PyPI, npm) and hosts internal packages. This:
+   - Ensures all dependencies come from a vetted, cached source
+   - Prevents supply-chain attacks from public registries
+   - Provides a consistent cache (faster builds, no registry outage risk)
+
+   For Python: pip is configured to use Artifactory URL with auth token
+   For npm/Node: .npmrc is written with Artifactory registry + auth token
+
+   In Docker builds, Artifactory credentials are passed as BuildKit secrets,
+   not baked into the image.
+
+--------------------------------------------------------------------------------
+8.5 CLOUDFORMATION & IaC
+--------------------------------------------------------------------------------
+
+Q16. How is infrastructure managed with CloudFormation in this project?
+
+A: The lrl-prd-digitt-infra repository contains CloudFormation templates
+   organized by resource type:
+     cloudformation/
+       fargate/
+         task-definition.yml   — ECS task definition template
+         ecs-lb.yml            — ALB configuration
+       policies/
+         fargate-policy.yml    — IAM roles and policies
+         security-groups.yml   — VPC security groups
+       dynamodb/
+         dynamodb-tables.yml   — DynamoDB table definitions
+       opensearch/
+         opensearch-cluster.yml — OpenSearch Serverless collection
+       mwaa/
+         foundational.yml      — MWAA KMS, security group, EventBridge
+
+   The infra GitHub Actions pipeline deploys these stacks in order
+   (networking before compute, IAM before ECS, etc.).
+
+Q17. What are stack dependencies in CloudFormation and how do you manage them?
+
+A: Stacks often depend on outputs from other stacks. For example:
+   - Security group stack exports the SG IDs
+   - ECS service stack imports those SG IDs via !ImportValue
+
+   Deployment order must respect these dependencies:
+   1. Networking/Security Groups (no dependencies)
+   2. IAM roles (depends on account/region)
+   3. ECR (no VPC dependencies)
+   4. ECS Cluster (depends on VPC)
+   5. ALB (depends on VPC + security groups)
+   6. ECS Services (depends on cluster + ALB + task role)
+
+   The pipeline job ordering (needs: [...]) enforces this sequence.
+
+Q18. What is the difference between CloudFormation Change Sets and direct updates?
+
+A: Change Set: You create a preview of what CloudFormation will change before
+   applying it. You can review additions, modifications, and replacements.
+   "Replacement" means the resource will be deleted and recreated (disruption).
+
+   Direct Update (sam deploy): Applies changes immediately without preview.
+   Fine for CI/CD automation but riskier for production changes.
+
+   Best practice: Use change sets for production infrastructure changes.
+   Automate with --no-execute-changeset, review, then execute.
+
+--------------------------------------------------------------------------------
+8.6 NETWORKING & SECURITY
+--------------------------------------------------------------------------------
+
+Q19. Explain the security group design for this project.
+
+A: Three-tier security group design:
+
+   ALB SG (lrl-prd-digitt-alb-v1-sg):
+     Inbound:  Only from Lilly corporate IP Prefix List
+               (not publicly accessible from internet)
+     Outbound: All (to reach ECS tasks)
+
+   ECS Service SG (lrl-prd-digitt-v1-sg):
+     Inbound:  Only from ALB SG (east-west traffic only from ALB)
+               This means no direct access to containers,
+               all traffic must pass through the load balancer
+     Outbound: All (to reach RDS, S3 VPC endpoint, Secrets Manager)
+
+   RDS Access SG (lrl-prd-digitt-v1-rds-access-sg):
+     Inbound:  Port 5432 from Lilly Prefix List only
+     Outbound: All
+
+   This creates defense in depth: even if an attacker gets past the ALB,
+   they cannot reach the database directly from outside.
+
+Q20. What is a VPC Endpoint and why would you use one?
+
+A: A VPC Endpoint allows your VPC resources (ECS tasks) to communicate with
+   AWS services (S3, Secrets Manager, ECR) without traversing the public
+   internet. Traffic stays within the AWS network.
+
+   Types:
+   - Gateway endpoints: S3, DynamoDB (free, route table entries)
+   - Interface endpoints: All other services (ENI with private IP, hourly cost)
+
+   Benefits:
+   - Reduced data transfer costs
+   - Improved security (no internet egress for AWS API calls)
+   - Required if ECS tasks are in subnets with no NAT Gateway
+
+   The MWAA EventBridge rule (aws-mwaa-vpce-rule) suggests VPC endpoints
+   are in use for MWAA connectivity.
+
+--------------------------------------------------------------------------------
+8.7 DATABASES & STORAGE
+--------------------------------------------------------------------------------
+
+Q21. Why use DynamoDB for status tracking instead of PostgreSQL?
+
+A: DynamoDB is better for status/event tracking because:
+   - Single-digit millisecond reads/writes at any scale
+   - PAY_PER_REQUEST billing: no capacity planning needed
+   - PITR enabled: recover to any point in the last 35 days
+   - Schemaless: easy to add fields to status events without migrations
+   - No connection pooling concerns (serverless, no connection limits)
+
+   PostgreSQL is used for relational, transactional data (recipes, campaigns)
+   where joins, transactions, and complex queries are needed.
+   DynamoDB is used for high-throughput, simple key-value lookups (job status).
+
+Q22. How do you handle database connection pooling in an ECS Fargate deployment?
+
+A: This project uses SQLAlchemy async engine with:
+     pool_size=100, max_overflow=200
+
+   Challenge: If 10 ECS tasks each have pool_size=100, that's 1000 connections
+   to RDS. PostgreSQL has a max_connections limit.
+
+   Solutions used:
+   - asyncpg: async driver means fewer threads blocking on DB I/O
+   - Connection pooling parameters tuned per service load
+   - Could add PgBouncer as a connection pooler sidecar container
+
+   For production scale, AWS RDS Proxy can be added — it maintains a
+   connection pool to RDS and proxies requests from ECS tasks, reducing
+   the actual number of connections to the database.
+
+Q23. How is S3 used in this project and what IAM permissions does it need?
+
+A: S3 serves as the document store for recipe files:
+   - Raw uploads: documents/{uuid}/raw/{filename}
+   - Processed output: documents/{uuid}/processed/{file}_parsed.json
+   - BOM exports: bom_exports/...
+
+   ECS Task Execution Role needs: s3:PutObject (for storing uploads)
+   ECS Task Role needs: s3:GetObject, s3:GetObjectVersion (for reading files)
+   Bucket policy: restricted to specific IAM roles
+
+   Best practices applied:
+   - Bucket names with lly-lrl-prd-digitt-* prefix (namespaced)
+   - IAM policies scoped to specific bucket ARN pattern (not s3:*)
+
+--------------------------------------------------------------------------------
+8.8 AIRFLOW / ORCHESTRATION
+--------------------------------------------------------------------------------
+
+Q24. How does Airflow trigger ECS tasks and track their completion?
+
+A: In the DigiTT Airflow DAGs, a custom ECSOperator is used:
+   1. Airflow task calls boto3/ECS API: run_task() with the task definition
+      ARN, cluster, and environment variables (S3 paths, recipe UUIDs)
+   2. The operator polls ECS describe_tasks() to monitor task state
+   3. When the ECS task reaches STOPPED state:
+      - If exitCode == 0: task succeeded
+      - If exitCode != 0: task failed, raise AirflowException
+   4. On success, the next Airflow task in the DAG is triggered
+
+   XCom (Airflow's cross-task communication) is used to pass the S3 output
+   path between tasks (recipe_parser → rm-process-stages → rm-unitops-params).
+
+Q25. What are DAG best practices for production Airflow?
+
+A: Key practices followed in DigiTT:
+   - start_date set to a fixed past date (2025-01-01), not dynamic datetime.now()
+   - retries: 0 with retry_delay: 5min (recipe parsing is idempotent)
+   - catchup: false (don't backfill missed runs)
+   - Parameterized DAGs (process_recipe_id, username in dag_run.conf)
+   - No top-level database calls (import-time code runs on every DAG parse)
+   - Task failures raise exceptions immediately with clear error messages
+   - Clear XCom cleanup to avoid data bloat
+
+--------------------------------------------------------------------------------
+8.9 GENERAL DEVOPS PRINCIPLES
+--------------------------------------------------------------------------------
+
+Q26. What is the principle of least privilege and how is it applied here?
+
+A: Every role/principal should have only the minimum permissions needed:
+   - ECS Task Execution Role: only ECR pull + CloudWatch write
+   - ECS Task Role: only the specific S3 buckets, specific DynamoDB tables,
+     specific Secrets Manager ARNs the app needs
+   - GitHub Actions Role: only CloudFormation, ECR, ECS operations on
+     lrl-prd-digitt-* resources (not *, not all services)
+   - ALB SG: only Lilly IP ranges, not 0.0.0.0/0
+   - ECS SG: only ALB SG, not 0.0.0.0/0
+
+Q27. What is Infrastructure as Code and what are its benefits?
+
+A: IaC means defining cloud infrastructure in version-controlled config files
+   (CloudFormation YAML in this case) instead of clicking through AWS console.
+
+   Benefits:
+   - Reproducibility: same template deploys identical infra to dev/qa/prod
+   - Version history: git blame shows who changed what and when
+   - Code review: infra changes go through PR review
+   - Disaster recovery: re-create entire environment from templates
+   - Drift detection: CloudFormation can detect manual console changes
+   - Documentation: templates serve as living documentation
+
+Q28. How would you roll back a bad deployment?
+
+A: Several strategies:
+   1. ECS Service rollback: Update the ECS service task definition back to
+      the previous revision (previous revision is still registered in ECS).
+      Each deploy registers a new task definition revision, so older ones
+      are always available.
+
+   2. ECR image tags: Immutable tags mean old images still exist in ECR.
+      Reference the previous Git SHA tag to roll back.
+
+   3. CloudFormation rollback: If a stack update fails, CloudFormation
+      automatically rolls back to the last stable state (configurable).
+
+   4. Database: Use RDS automated backups or DynamoDB PITR to restore
+      data if a code change caused data corruption.
+
+   Process: Identify bad commit SHA → push revert commit → pipeline
+   automatically deploys the reverted code.
+
+--------------------------------------------------------------------------------
+8.10 SCENARIO-BASED QUESTIONS
+--------------------------------------------------------------------------------
+
+Q29. A recipe parsing job is stuck in Airflow. How do you debug it?
+
+A: Step-by-step:
+   1. Check Airflow MWAA UI: look at the DAG run and task logs
+   2. Identify the failing task: recipe_parser / rm-process-stages / etc.
+   3. If the task shows "running" for too long:
+      - Check ECS console: is the ECS task still running or has it stopped?
+      - If ECS task stopped: check exit code. Non-zero = error in container.
+   4. Check CloudWatch logs for the ECS task:
+      Log group: /ecs/lrl-prd-digitt-wbwd-rm-parser
+      Look for Python stack trace or boto3 error
+   5. Common issues:
+      - S3 path incorrect: raw file doesn't exist at expected key
+      - Secrets Manager: DB credentials expired or secret ARN changed
+      - Memory: task exceeded 4 GB memory limit (check CloudWatch metrics)
+      - IAM: task role missing permission for a specific S3 key
+   6. Retry the Airflow task after fixing the root cause
+   7. If data was partially written, check idempotency logic in the code
+
+Q30. How would you reduce deployment time for this project?
+
+A: Current bottlenecks and solutions:
+   1. Docker build time:
+      - Use BuildKit layer caching
+      - Cache pip dependencies: COPY requirements.txt first, RUN pip install,
+        then COPY the app code (layer cache hit if requirements unchanged)
+      - Use self-hosted GitHub Actions runners with local Docker cache
+      - Use GitHub Actions cache for pip/npm
+
+   2. ECR push time:
+      - Only push layers that changed (Docker layer deduplication)
+      - Use ECR replication for cross-region deployments
+
+   3. ECS deployment time:
+      - Reduce health check grace period if app starts quickly
+      - Tune deregistration_delay on target group
+
+   4. Parallelize jobs:
+      - Deploy backend and frontend in parallel (different services)
+      - Run unit tests in parallel with Docker build
+
+Q31. A developer accidentally pushed a secret to the Git repository. What do you do?
+
+A: Immediate actions (treat as a breach):
+   1. Rotate/revoke the exposed credential immediately in the relevant service
+      (Secrets Manager, Artifactory, etc.). Don't wait.
+   2. Audit CloudTrail / access logs: was the secret used after the commit?
+   3. Remove the secret from Git history:
+      - git filter-repo --path <file> --invert-paths (remove file)
+      - Or BFG Repo Cleaner for specific strings
+      - Force push (coordinate with team, warn about rebase needed)
+   4. Notify security team (Lilly's CISO/incident response process)
+   5. Check if Checkmarx SAST or GitHub Secret Scanning would have caught this
+      (improve pre-commit hooks or GitHub push protection)
+
+   Prevention:
+   - Enable GitHub push protection (blocks commits with detected secrets)
+   - Add pre-commit hooks: detect-secrets or truffleHog
+   - Store secrets only in Secrets Manager, never in code or .env files
+
+Q32. How would you implement auto-scaling for the ECS services?
+
+A: ECS Application Auto Scaling:
+   1. Register the ECS service as a scalable target
+   2. Create scaling policies:
+
+   Target Tracking (preferred):
+     - Metric: ECSServiceAverageCPUUtilization
+     - Target: 70% CPU
+     - Min capacity: 2 tasks, Max capacity: 10 tasks
+     ECS will automatically add/remove tasks to maintain ~70% CPU
+
+   Step Scaling (more control):
+     - CloudWatch Alarm: CPU > 80% for 2 minutes → add 2 tasks
+     - CloudWatch Alarm: CPU < 30% for 10 minutes → remove 1 task
+
+   Considerations for DigiTT:
+   - ALB Request Count per Target is a better metric for the API services
+   - Campaign Planner calculation endpoints are CPU-intensive: CPU metric
+   - Minimum 2 tasks in prod for high availability across AZs
+   - Use Fargate Spot for dev/qa to reduce costs
+
+Q33. The production RDS is running out of storage. How do you handle this?
+
+A: Immediate:
+   1. Enable RDS Storage Autoscaling (if not already):
+      - Set autoscale threshold: when free storage < 10%
+      - Set maximum storage: sized appropriately
+   2. If autoscaling wasn't enabled, manually scale storage via AWS console
+      (online operation, no downtime for Multi-AZ)
+
+   Investigation:
+   3. Check CloudWatch: FreeStorageSpace metric trend
+   4. Connect to DB and run queries to find large tables:
+      SELECT pg_size_pretty(pg_total_relation_size(relid)), relname
+      FROM pg_stat_user_tables ORDER BY pg_total_relation_size(relid) DESC;
+   5. Check for bloat: unused indexes, dead tuples (VACUUM ANALYZE)
+   6. Check logs: are campaign_output or buffer_output tables growing fast?
+
+   Long-term:
+   7. Set up CloudWatch Alarm on FreeStorageSpace with SNS notification
+   8. Implement data archiving for old campaigns/recipes to S3
+   9. Implement table partitioning for large time-series tables
+
+================================================================================
+END OF DOCUMENT
+================================================================================
+
+Document created for: DigiTT Platform (Eli Lilly — LRL)
+Last updated: August 2026
+Prepared for: DevOps Engineer Interview Preparation (4–5 years experience)
+================================================================================

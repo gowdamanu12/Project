@@ -1,0 +1,1177 @@
+================================================================================
+  LRL WBWD REPORT AUTOGENERATION (AutoGen) — DEVOPS ENGINEER REFERENCE GUIDE
+  For: DevOps Engineers with 4-5 Years of Experience
+  Date: August 2026
+================================================================================
+
+TABLE OF CONTENTS
+-----------------
+  1. Project Introduction
+  2. High-Level Architecture Diagram
+  3. Detailed System Design
+     3.1  Frontend Layer
+     3.2  API Gateway / Load Balancer Layer
+     3.3  Backend Services Layer
+     3.4  Data Processing Pipeline Layer
+     3.5  Data Storage Layer
+     3.6  Security & Authentication
+     3.7  Observability & Logging
+  4. Repository Structure Overview
+  5. Infrastructure-as-Code Overview
+  6. CI/CD Pipeline Design
+  7. DevOps Interview Questions & Answers
+     Section A  — Docker & Containerization
+     Section B  — AWS Services (ECS Fargate, Lambda, S3, DynamoDB, OpenSearch)
+     Section C  — Infrastructure-as-Code (CloudFormation)
+     Section D  — CI/CD & GitHub Actions
+     Section E  — Security & IAM
+     Section F  — Observability, Logging & Monitoring
+     Section G  — Networking & Load Balancing
+     Section H  — Python/FastAPI Backend DevOps
+     Section I  — Microservices & Architecture Patterns
+     Section J  — Incident Response & Troubleshooting
+
+
+================================================================================
+1. PROJECT INTRODUCTION
+================================================================================
+
+Project Name  : LRL WBWD Report AutoGeneration (AutoGen)
+Organization  : Eli Lilly — LRL WBWD POD2 Team
+Contact Email : wbwdpod2@lilly.com
+Version       : 1.2.0 (UI), 1.0.0 (API)
+
+OVERVIEW
+--------
+AutoGen is an enterprise-grade, AI-powered automated report generation platform
+built for Eli Lilly's LRL WBWD (World Biosciences & World Development) group.
+The platform eliminates manual report authoring by leveraging Large Language
+Models (LLMs), document parsing pipelines, and vector search to produce
+consistent, high-quality clinical and scientific reports.
+
+CORE BUSINESS VALUE
+-------------------
+  - Reduces manual document authoring effort by automating structured report
+    creation from raw clinical protocols and trial data.
+  - Provides a configurable, DynamoDB-driven form UI so reports can be
+    customised per business unit without code changes.
+  - Integrates with existing Lilly data systems via secure API calls and
+    federated AWS IAM roles.
+  - Supports multi-environment deployments (dev, qa, prod) with parity in
+    infrastructure and configuration.
+
+KEY CAPABILITIES
+----------------
+  - Protocol Parsing     : Extracts structured content (metadata, hierarchy,
+                           citations, summaries) from DOCX/PDF documents.
+  - Embedding Generation : Converts parsed content into vector embeddings
+                           stored in OpenSearch for semantic retrieval.
+  - Report Generation    : Orchestrates LLM calls to produce full report drafts.
+  - Document Authoring   : A dedicated microservice converts report data into
+                           formatted DOCX/PDF output.
+  - Real-time Updates    : WebSocket endpoint notifies the browser when
+                           long-running report jobs complete.
+  - Audit Logging        : All API activity is captured in a centralised
+                           structured log (structlog + OpenSearch).
+
+TECHNOLOGY STACK SUMMARY
+------------------------
+  Layer              | Technology
+  ------------------|---------------------------------------------------
+  Frontend           | React 18, TypeScript, Vite, MUI v7, Redux Toolkit,
+                     | React Router v7, Azure MSAL (SSO), Tailwind CSS
+  Backend API        | Python 3.13, FastAPI 0.136, Uvicorn, Pydantic v2
+  Auth               | Azure AD (MSAL) + API Key (x-api-key header)
+  Containerisation   | Docker (multi-stage, slim images)
+  Orchestration      | AWS ECS Fargate
+  Serverless Compute | AWS Lambda (Python 3.x)
+  Database           | AWS DynamoDB (NoSQL)
+  Search / Vector DB | AWS OpenSearch Service
+  Object Storage     | AWS S3
+  Secret Management  | AWS Secrets Manager
+  Container Registry | Amazon ECR + JFrog Artifactory (Python packages)
+  IaC                | AWS CloudFormation (YAML templates)
+  CI/CD              | GitHub Actions
+  Monitoring         | AWS CloudWatch + custom structlog pipeline
+  Load Balancing     | AWS Application Load Balancer (ALB)
+
+
+================================================================================
+2. HIGH-LEVEL ARCHITECTURE DIAGRAM
+================================================================================
+
+                          +---------------------------------------+
+                          |         USER BROWSER / CLIENT          |
+                          |   React + TypeScript SPA (Vite)        |
+                          |   Auth: Azure AD MSAL (SSO)            |
+                          +-----------------+-----------------------+
+                                            |  HTTPS
+                          +-----------------v-----------------------+
+                          |     AWS APPLICATION LOAD BALANCER       |
+                          |  (ALB)  —  TLS Termination              |
+                          |  Path-based routing rules:              |
+                          |    /api/*        -> Middleware Svc      |
+                          |    /docauthor/*  -> Doc-Authoring Svc   |
+                          |    /*            -> Autogen-UI Svc      |
+                          +----+---------------------------+--------+
+                               |                            |
+               +---------------v------+      +-------------v-------------+
+               |  ECS FARGATE SERVICE |      |   ECS FARGATE SERVICE      |
+               |  Middleware (reports)|      |   Doc-Authoring            |
+               |  FastAPI + Uvicorn   |      |   FastAPI + Uvicorn        |
+               |  Port 8080           |      |   Port 8080                |
+               |  Routes:             |      |   DOCX/PDF generation      |
+               |   /api/data          |      +----------------------------+
+               |   /api/reports       |
+               |   /api/logs          |
+               |   /api/socket (WS)   |
+               |   /health            |
+               +-----+-----------------+
+                     |
+          +----------+-----------------------+
+          |          |                       |
+ +--------v-------+ +v--------------+ +------v-----------+
+ |  AWS DynamoDB  | |  AWS S3       | |  AWS OpenSearch   |
+ |  Tables:       | |  Buckets:     | |  (Vector Store +  |
+ |  - reports     | |  - raw docs   | |   Search Index)   |
+ |  - config      | |  - parsed     | +--------------------+
+ |  - logs        | |  - reports    |
+ +----------------+ +-----+---------+
+                          |  S3 Event (PUT)
+          +---------------v-----------------------------------+
+          |           AWS STEP FUNCTIONS / EVENT BRIDGE        |
+          |         (Data Processing Pipeline Orchestration)   |
+          +------+----------------------------------+---------+
+                 |                                  |
+    +------------v-----------+       +--------------v--------------+
+    |  Lambda: Protocol      |       |  Lambda: Embeddings          |
+    |  Parser                |       |  Creator                     |
+    |  - Extracts metadata   |       |  - Creates vector            |
+    |  - Parses hierarchy    |       |    embeddings from parsed    |
+    |  - Content segments    |       |    content                   |
+    |  - Citations           |       |  - Stores in OpenSearch      |
+    |  - Summaries (LLM)     |       |  - Returns index metadata    |
+    +-------------------------+       +-------------------------------+
+
+SUPPORTING INFRASTRUCTURE
+--------------------------
+  +--------------------------------------------------------------------+
+  |  AWS Secrets Manager    — API keys, DB credentials, certs          |
+  |  Amazon ECR             — Container image registry                 |
+  |  JFrog Artifactory      — Private PyPI mirror (pip install)        |
+  |  AWS IAM / Fed. Roles   — Fine-grained least-privilege access      |
+  |  AWS CloudWatch         — Logs, metrics, alarms                    |
+  |  GitHub Actions         — CI/CD pipelines for all repos            |
+  +--------------------------------------------------------------------+
+
+NETWORK TOPOLOGY (Simplified)
+------------------------------
+  Internet -> Route 53 (DNS) -> ALB (public subnet)
+  ALB -> ECS Fargate Tasks (private subnet)
+  ECS Tasks -> DynamoDB / S3 / OpenSearch (VPC endpoints or NAT GW)
+  Lambda -> S3 / OpenSearch (within VPC or via VPC endpoints)
+  All inter-service calls authenticated via x-api-key header.
+
+
+================================================================================
+3. DETAILED SYSTEM DESIGN
+================================================================================
+
+3.1  FRONTEND LAYER
+--------------------
+Technology  : React 18, TypeScript, Vite 6, MUI v7, Redux Toolkit, Tailwind CSS
+Auth        : @azure/msal-react + @azure/msal-browser (Azure AD SSO)
+HTTP Client : Axios
+Real-time   : WebSocket (via /api/socket endpoint)
+Deployment  : Docker image (nginx-based), served via ALB / CloudFront-equivalent
+
+Key Design Decisions:
+  - DynamoDB-driven form configuration: The "Generate Report" form is fully
+    dynamic. Its fields, steps, validation rules, and dropdown options are
+    fetched from the DynamoDB "lrl-prd-autogen-reports-configuration" table,
+    allowing business units to customise report types without frontend code
+    changes.
+  - Redux Toolkit handles global state (report status, user session, data).
+  - React Router v7 provides SPA routing.
+  - All API requests include the Azure AD token + x-api-key header.
+  - @dnd-kit/sortable enables drag-and-drop report section reordering.
+
+Build Pipeline:
+  npm run build -> tsc -b && vite build -> /dist folder -> Docker COPY -> nginx
+
+3.2  API GATEWAY / LOAD BALANCER LAYER
+----------------------------------------
+Service     : AWS Application Load Balancer (ALB)
+TLS         : Certificate managed via ACM; TLS terminates at ALB.
+Routing     : Listener rules with path patterns and priority numbers:
+  Priority 1 -> /api/*        -> Target Group: middleware (reports) ECS service
+  Priority 2 -> /docauthor/*  -> Target Group: doc-authoring ECS service
+  Default    -> /*            -> Target Group: autogen-ui ECS service
+
+Health Checks : ALB hits /health on each ECS task every 30s.
+Stickiness    : Not required (stateless APIs).
+Logging       : ALB access logs stored in S3, forwarded to OpenSearch.
+
+3.3  BACKEND SERVICES LAYER
+----------------------------
+Both backend services follow the same pattern:
+
+  Docker Image  : python:3.13-slim-bookworm
+  Process       : uvicorn app.main:app --host 0.0.0.0 --port 8080
+  Framework     : FastAPI with Pydantic v2 models
+  Port          : 8080 (internal); ALB maps 443 -> 8080
+
+  Middleware Service (reports)
+  ----------------------------
+  Entrypoint  : middleware/app/main.py
+  Endpoints   :
+    GET  /health                          — health check
+    GET  /api/data/{business}/...         — data fetch endpoints
+    GET  /api/reports/{business}/...      — report CRUD endpoints
+    POST /api/reports/{business}/...      — report submission / generation
+    WS   /api/socket/ws/{id}             — WebSocket for job notifications
+    GET  /api/logs/...                    — audit log endpoints
+
+  Key patterns:
+    - APIKeyMiddleware validates x-api-key on every request except /health.
+    - API key loaded from AWS Secrets Manager at startup (load_api_key_to_env).
+    - CORS restricted to a single allowed frontend origin (FE_URL env var).
+    - Structured logging via structlog on every route entry/exit.
+    - DynamoDB accessed via DynamodbOperations abstraction (boto3 underneath).
+    - S3 accessed via PresignedUrlGenerator (generates short-lived URLs for
+      secure document download without exposing bucket directly).
+    - Async WebSocket connections in /api/socket notify browser clients when
+      report generation is complete (push model, no polling required).
+
+  Doc-Authoring Service
+  ---------------------
+  Separate Fargate service, same Docker/FastAPI pattern.
+  Accessible at /docauthor/* via ALB.
+  Responsible for DOCX-to-PDF conversion and document assembly.
+
+  Shared Libraries (shared/)
+  --------------------------
+  shared/auth/auth_middleware.py     — authentication middleware
+  shared/autogen_log/logger.py       — structlog configuration
+  shared/config_files/variables.py   — environment-driven config classes
+  shared/utils/error_handler.py      — centralised exception handling
+  shared/utils/helpers.py            — common utility functions
+  shared/utils/llm_service.py        — LLM API abstraction
+  shared/utils/security_utils.py     — APIKeyMiddleware, custom OpenAPI schema
+  shared/utils/aws/                  — boto3 helpers (DynamoDB, S3, Secrets)
+  shared/utils/requests/             — HTTPX async client wrapper
+
+3.4  DATA PROCESSING PIPELINE LAYER
+--------------------------------------
+Technology  : AWS Lambda (Python) + AWS EventBridge / Step Functions
+Trigger     : S3 PutObject event on raw document bucket
+
+Pipeline Steps (in order):
+  Step 1 — Protocol Parser Lambda
+    Trigger   : S3 event (new document uploaded)
+    Input     : S3 bucket + key from EventBridge detail
+    Process   :
+      - Reads config from S3 (CONFIG_BUCKET / CONFIG_FILE env vars)
+      - Services invoked (in protocol_parser/services/):
+          content_extraction.py     — extracts raw text from DOCX/PDF
+          content_flattening.py     — normalises and cleans content
+          content_segmentation.py   — splits content into semantic segments
+          hierarchy_construction.py — builds document outline/hierarchy
+          metadata_extraction.py    — extracts protocol metadata
+          citation_extraction.py    — identifies and formats citations
+          summary_generation.py     — calls LLM to produce section summaries
+          output_transformation.py  — formats output for downstream use
+    Output    : Parsed content JSON saved to S3; returns path + doc metadata
+
+  Step 2 — Embeddings Creator Lambda
+    Trigger   : Invoked by Step Functions after Protocol Parser completes
+    Input     : data_bucket, extracted_content_s3_path, doc_uuid
+    Process   :
+      - Reads parsed JSON from S3
+      - Generates vector embeddings (via LLM embedding API)
+      - Stores vectors in OpenSearch (collection_name, index_name)
+    Output    : vector_collection_name, vector_index_name returned to
+                Step Functions for downstream report generation
+
+  Configs    : Stored in S3 (embeddings.json, protocol_parser.json)
+  Logging    : common/logger_utils.py (structured Lambda logging)
+
+3.5  DATA STORAGE LAYER
+------------------------
+  AWS DynamoDB
+  ------------
+  Purpose   : Fast, low-latency NoSQL storage for application state.
+  Key Tables:
+    lrl-prd-autogen-reports-configuration  — form config per business unit
+    lrl-prd-autogen-reports-documents      — report documents per owner
+    lrl-prd-autogen-logs                   — application audit logs
+  Access    : boto3 via shared DynamodbOperations class.
+  Billing   : On-demand capacity (auto-scaling, no pre-provisioning needed).
+
+  AWS S3
+  ------
+  Purpose   : Object storage for documents, embeddings configs, report outputs.
+  Buckets   :
+    Raw document bucket     — user uploads land here (triggers pipeline)
+    Parsed content bucket   — protocol parser output JSON
+    Report output bucket    — generated DOCX/PDF reports
+    Config bucket           — Lambda config JSON files
+  Security  : Bucket policies + IAM roles; no public access; presigned URLs
+              for time-limited client downloads.
+
+  AWS OpenSearch Service
+  ----------------------
+  Purpose   : Semantic vector search + audit log analytics.
+  Use Cases :
+    - Stores document embeddings for RAG (Retrieval-Augmented Generation).
+    - Stores structured application logs for querying and dashboarding.
+  Access    : Fine-grained access control via IAM + OpenSearch internal roles.
+
+3.6  SECURITY & AUTHENTICATION
+--------------------------------
+  Identity   : Azure Active Directory (MSAL) — browser SSO for frontend users.
+  API Auth   : x-api-key header validated by APIKeyMiddleware (FastAPI).
+               Key value loaded at startup from AWS Secrets Manager.
+  HTTPS      : TLS enforced at ALB; HTTP -> HTTPS redirect rule.
+  CORS       : FastAPI CORSMiddleware restricted to a single frontend origin.
+  IAM        : Least-privilege IAM roles per service; federated roles allow
+               GitHub Actions to assume AWS roles without long-lived credentials.
+  Secrets    : All sensitive config (DB passwords, API keys, certs) stored in
+               AWS Secrets Manager. Never passed via env vars in Dockerfiles.
+  Container  : Dockerfile uses BuildKit --mount=type=secret to inject
+               JFrog Artifactory credentials at build time without leaking
+               secrets into image layers.
+  CVE Patching: Dockerfile explicitly upgrades perl-base, openssl, libssl3
+                on build to remediate known CVEs.
+  CA Bundle  : Corporate CA certificate (ca_bundle.pem) embedded in images
+               to support Lilly internal TLS inspection proxies.
+
+3.7  OBSERVABILITY & LOGGING
+------------------------------
+  Structured Logs  : structlog (Python) — all log entries are JSON with
+                     service name, function name, key-value context.
+  Log Routing      : CloudWatch Logs -> Lambda subscription filter -> OpenSearch
+                     (via lrl-prd-autogen-data-processing-pipelines/logging/)
+  ALB Logs         : Access logs -> S3 -> OpenSearch.
+  Metrics          : ECS task CPU/memory, Lambda duration/errors via CloudWatch.
+  Alarms           : CloudWatch alarms on error rates, Lambda timeouts.
+  Tracing          : Structured request IDs in logs correlate across services.
+
+
+================================================================================
+4. REPOSITORY STRUCTURE OVERVIEW
+================================================================================
+
+Four Git repositories (mono-repo style, separate repos deployed independently):
+
+  lrl-prd-autogen-ui/                  — React/TypeScript frontend
+  lrl-prd-autogen-backend/             — FastAPI backend services + shared libs
+  lrl-prd-autogen-data-processing-pipelines/  — Lambda data pipelines
+  lrl-prd-autogen-infra/               — CloudFormation IaC + deploy scripts
+
+BACKEND REPO DETAIL:
+  middleware/
+    Dockerfile                         — image: python:3.13-slim-bookworm
+    requirements.txt                   — pinned Python deps
+    app/
+      main.py                          — FastAPI app factory, middleware wiring
+      api/                             — route handlers (data, reports, logs,
+                                         socket, health)
+      core/                            — execution variables, env config
+      domains/                         — Pydantic request/response models
+      middlewares/                     — app-specific middleware
+      utils/                           — S3, AWS utilities
+    tests/                             — pytest test suite
+  services/doc-authoring/              — separate FastAPI service (DOCX/PDF)
+  shared/                              — reusable Python libraries across svcs
+
+INFRA REPO DETAIL:
+  cloudformation/
+    fargate/                           — ECS cluster, task definitions, services
+    dynamodb/                          — table definitions
+    opensearch/                        — domain + index config
+    ecr/                               — container registries
+    policies/                          — IAM managed policies
+    secrets/                           — Secrets Manager resource templates
+    federated_roles/                   — GitHub OIDC roles for CI/CD
+    githubaction/                      — IAM roles for GitHub Actions
+  config/containers.yaml               — service-to-ALB routing manifest
+  scripts/deploy.sh                    — CloudFormation deploy automation
+  tags.{dev,qa,prod}.json              — environment-specific resource tags
+
+
+================================================================================
+5. INFRASTRUCTURE-AS-CODE OVERVIEW
+================================================================================
+
+All AWS infrastructure is defined in CloudFormation YAML templates.
+
+KEY DESIGN PRINCIPLES:
+  - Environment parity: same templates parameterised for dev/qa/prod.
+  - Tagging strategy: all resources tagged via tags.{env}.json (project,
+    environment, cost-centre, owner).
+  - No hardcoded credentials or ARNs in templates; all passed as parameters.
+  - Separate stacks per logical component (DynamoDB, Fargate, OpenSearch, etc.)
+    allowing independent updates with minimal blast radius.
+  - Policies are scoped with least-privilege: each Fargate task role grants
+    access only to its specific DynamoDB tables, S3 buckets, secrets.
+
+DEPLOYMENT FLOW:
+  1. Developer merges PR to main branch.
+  2. GitHub Actions workflow triggers.
+  3. Action assumes AWS IAM role via OIDC federation (no long-lived keys).
+  4. CloudFormation changeset is created and reviewed.
+  5. Changeset executed -> infrastructure updated.
+  6. New Docker images pushed to ECR.
+  7. ECS service update triggered (rolling deployment).
+  8. ALB health checks confirm new tasks are healthy before draining old ones.
+
+MULTI-ENV STRATEGY:
+  - dev  : lowest cost (smaller instance types, on-demand Lambda)
+  - qa   : mirrors prod topology for accurate testing
+  - prod : HA configuration; DynamoDB + OpenSearch in multi-AZ
+
+
+================================================================================
+6. CI/CD PIPELINE DESIGN
+================================================================================
+
+Each repository has its own GitHub Actions workflow.
+
+BACKEND CI/CD PIPELINE:
+  1. Lint & Type Check (flake8, mypy)
+  2. Unit Tests (pytest, with conftest fixtures)
+  3. Docker Build (BuildKit secrets for JFrog creds)
+  4. Docker Image Scan (ECR vulnerability scan)
+  5. Push to ECR (tag: git SHA + environment)
+  6. Update ECS Service (force new deployment)
+  7. Wait for ECS Stabilization (health check)
+
+FRONTEND CI/CD PIPELINE:
+  1. npm install + npm run lint (ESLint)
+  2. npm run build (tsc + vite build)
+  3. Docker build + push to ECR
+  4. ECS service update
+
+INFRA PIPELINE:
+  1. cfn-lint (CloudFormation template linting)
+  2. Create CloudFormation changeset
+  3. Manual approval gate (for prod)
+  4. Execute changeset
+
+CREDENTIALS:
+  GitHub Actions uses OIDC to assume AWS IAM roles — no long-lived AWS
+  access keys stored in GitHub Secrets. Role trust policy restricts
+  assumption to specific repo + branch combinations.
+
+ARTIFACT REGISTRY:
+  Docker images    -> Amazon ECR (per environment, per service)
+  Python packages  -> JFrog Artifactory (Lilly internal PyPI mirror)
+
+
+================================================================================
+7. DEVOPS INTERVIEW QUESTIONS & ANSWERS
+================================================================================
+
+--------------------------------------------------------------------------------
+SECTION A — DOCKER & CONTAINERISATION
+--------------------------------------------------------------------------------
+
+Q1. Walk me through how you write a secure, production-ready Dockerfile.
+
+A1. A production Dockerfile should follow these principles:
+
+    - Use a minimal base image to reduce attack surface. In this project we
+      use python:3.13-slim-bookworm. Avoid "latest" tags; pin versions.
+    - Run OS package upgrades early to patch known CVEs in base image
+      packages (e.g., openssl, perl-base).
+    - Never embed secrets in layers. Use BuildKit --mount=type=secret to
+      inject credentials at build time without persisting them in the image.
+      In this project JFrog Artifactory credentials are injected this way:
+        RUN --mount=type=secret,id=JF_ARTIFACTORY_TOKEN \
+            pip install --index-url https://...$(cat /run/secrets/...)...
+    - Install only what is needed; run apt-get clean and remove /var/lib/apt/
+      lists/ to reduce image size.
+    - Set a non-root USER for the running process (principle of least
+      privilege).
+    - EXPOSE only required ports (here: 8080).
+    - Use a CMD (not ENTRYPOINT) for the process so it is overridable.
+    - Multi-stage builds when compiling assets (e.g., frontend: builder stage
+      with Node, final stage with nginx).
+
+Q2. What is Docker BuildKit and why is --mount=type=secret important?
+
+A2. BuildKit is Docker's next-generation build engine with better caching,
+    parallel builds, and secrets handling. --mount=type=secret allows you to
+    mount a secret file into a build step WITHOUT writing it to any image
+    layer. This is critical because anything written in a RUN layer is
+    inspectable via docker history or docker image inspect, even if removed
+    in a later layer. With BuildKit secrets, the credentials exist only in
+    memory during that specific build step and never touch the layer cache.
+    In this project, JFrog Artifactory email/token/auth are mounted this way.
+
+Q3. How do you manage environment-specific configuration for containers in
+    ECS Fargate?
+
+A3. Configuration is injected at runtime, not baked into images:
+    - Non-sensitive values (ENV, FE_URL, ALB_URL, DynamoDB table names) are
+      set as environment variables in the ECS task definition.
+    - Sensitive values (API keys, DB passwords) are stored in AWS Secrets
+      Manager and referenced in the task definition as secrets: the value
+      is injected as an env var by the ECS agent at container startup.
+    - At application startup, FastAPI calls load_api_key_to_env() which
+      fetches from Secrets Manager via boto3 and sets os.environ.
+    - CA certificate is COPY-ed into the image at build time (not a secret
+      but specific to the corporate network environment).
+
+Q4. How do you reduce Docker image size?
+
+A4. Techniques used in this project and general best practices:
+    - Use slim/alpine base images (slim-bookworm here).
+    - Chain apt-get commands: update + install + clean in one RUN layer.
+    - Remove apt cache: rm -rf /var/lib/apt/lists/*
+    - Use --no-cache-dir with pip.
+    - Use multi-stage builds for compiled languages.
+    - .dockerignore file to exclude tests, docs, .git, __pycache__, etc.
+    - Pin only needed dependencies in requirements.txt.
+
+Q5. What is the difference between CMD and ENTRYPOINT in a Dockerfile?
+
+A5. ENTRYPOINT defines the executable that always runs (not easily overridden).
+    CMD provides default arguments to the entrypoint or a default command.
+    In this project: CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0",
+    "--port", "8080"]. This is overridable via docker run ... <new-command>
+    which is useful for debugging (e.g., running a shell instead). If
+    ENTRYPOINT were used, you would need --entrypoint to override it.
+
+--------------------------------------------------------------------------------
+SECTION B — AWS SERVICES (ECS FARGATE, LAMBDA, S3, DYNAMODB, OPENSEARCH)
+--------------------------------------------------------------------------------
+
+Q6. Explain how ECS Fargate works and how it differs from EC2-based ECS.
+
+A6. ECS (Elastic Container Service) can run tasks on two compute modes:
+    EC2 mode    : You manage the underlying EC2 instances in the cluster.
+                  You control instance types, scaling, patching.
+    Fargate mode: AWS manages the underlying compute. You define CPU/memory
+                  at the task definition level and AWS provisions and manages
+                  the virtual machine behind the scenes. You only pay for
+                  the vCPU and memory used while tasks run.
+
+    In this project, Fargate is chosen because:
+    - No server management overhead (no EC2 patching, AMI updates).
+    - Pay-per-use: ideal for variable traffic patterns.
+    - Tasks run in isolated micro-VMs per task, improving security isolation.
+    - Integrates natively with ALB, CloudWatch, Secrets Manager, ECR.
+
+    Fargate task networking: each task gets an ENI (Elastic Network Interface)
+    with its own private IP in the VPC subnet. Security Groups control
+    inbound/outbound traffic at the task level.
+
+Q7. How do you handle zero-downtime deployments with ECS Fargate?
+
+A7. ECS rolling update deployment:
+    - minimumHealthyPercent: 100 (never kill old tasks until new ones pass
+      health checks). In this project 50% is typical for dev, 100% for prod.
+    - maximumPercent: 200 (allows up to 2x tasks temporarily during rollout).
+    - ALB health check grace period allows new tasks time to start before
+      traffic is sent to them.
+    - ECS registers new tasks with the ALB target group, waits for health
+      check to pass, then drains connections from old tasks before stopping.
+    - Rollback: ECS service can be updated back to the previous task
+      definition revision if deployment fails.
+
+Q8. Explain the AWS Lambda event-driven model used in this project.
+
+A8. Lambda in this project handles document processing:
+    Step 1: A document is uploaded to S3. S3 sends a PutObject event to
+            EventBridge (or S3 notification rule).
+    Step 2: EventBridge triggers the Protocol Parser Lambda. The event
+            contains the bucket name and object key.
+    Step 3: Lambda reads the document from S3, processes it (parsing,
+            LLM calls for summaries), and writes parsed JSON back to S3.
+    Step 4: Lambda returns output (parsed_content_s3_path) to Step Functions.
+    Step 5: Step Functions invokes the Embeddings Lambda with the parsed
+            content path.
+    Step 6: Embeddings Lambda reads parsed JSON, generates vectors, stores
+            in OpenSearch, returns index metadata.
+
+    This decoupled, event-driven approach means each step scales
+    independently, failures are isolated, and retries are handled by
+    Step Functions.
+
+Q9. How do you secure S3 buckets in this project?
+
+A9. Multiple layers:
+    - Block all public access at bucket and account level.
+    - Bucket policies restrict access to specific IAM roles (Fargate task
+      role, Lambda execution role).
+    - Encryption at rest: S3 SSE-KMS with Lilly-managed KMS keys.
+    - Encryption in transit: enforced via bucket policy (deny HTTP).
+    - Presigned URLs: used by the API to give the frontend temporary,
+      scoped access to download specific report files without exposing
+      the bucket publicly or sharing credentials.
+    - Object versioning on report output buckets for audit trail.
+
+Q10. How does DynamoDB fit into the architecture and how do you optimise it?
+
+A10. DynamoDB is used for:
+     - Report configurations (form definitions per business unit).
+     - Document/report metadata (owner, status, timestamps).
+     - Audit logs.
+
+     Key access patterns designed into the partition key / sort key schema:
+     - Partition key = "business" for configurations (single-table per
+       business unit config).
+     - GSIs (Global Secondary Indexes) for queries like "all reports by
+       owner" without full scans.
+
+     Optimisations:
+     - On-demand billing mode avoids capacity planning.
+     - Avoid large items (store document content in S3, store metadata in
+       DynamoDB).
+     - Use consistent reads only when strictly necessary (eventually
+       consistent reads are cheaper and often sufficient).
+     - Connection reuse via boto3 client caching (not re-creating client
+       per request).
+
+Q11. What is OpenSearch used for in this project and how is it secured?
+
+A11. OpenSearch serves two purposes:
+     1. Vector store for RAG: Document embeddings generated by the
+        Embeddings Lambda are stored as k-NN vectors in OpenSearch. When
+        generating a report, the backend queries OpenSearch for semantically
+        similar content to use as LLM context.
+     2. Log analytics: Structured application logs and ALB access logs are
+        ingested for search and dashboarding.
+
+     Security:
+     - VPC-only endpoint (not publicly accessible).
+     - Fine-grained access control (IAM + internal OpenSearch roles).
+     - Encryption at rest (KMS) and in transit (TLS).
+     - IAM policies restrict which Fargate roles and Lambda roles can
+       interact with which indexes.
+
+--------------------------------------------------------------------------------
+SECTION C — INFRASTRUCTURE-AS-CODE (CLOUDFORMATION)
+--------------------------------------------------------------------------------
+
+Q12. How do you manage multiple environments with CloudFormation?
+
+A12. In this project:
+     - A single set of templates is parameterised (Parameters section).
+     - Environment-specific values in tags.{dev,qa,prod}.json and separate
+       parameter override files per environment.
+     - Stack names include the environment suffix (e.g., lrl-prd-autogen-
+       fargate-dev, lrl-prd-autogen-fargate-prod).
+     - A deploy.sh script accepts an environment argument and passes the
+       correct parameter files to aws cloudformation deploy.
+     - Separate AWS accounts or separate regions per environment are also
+       common patterns to provide stronger isolation.
+
+Q13. What is a CloudFormation changeset and why use it?
+
+A13. A changeset is a preview of what CloudFormation will add, modify, or
+     delete before actually executing the changes. It is like a Terraform
+     plan. Benefits:
+     - Review impact before applying (prevents accidental deletions).
+     - Required for production deployments as a safety gate.
+     - Integrated with GitHub Actions for automated preview + manual
+       approval before apply.
+     - Can detect replacement-requiring changes (e.g., changing a DynamoDB
+       partition key requires table recreation).
+
+Q14. How do you handle stack dependencies in CloudFormation?
+
+A14. Methods:
+     - Outputs + ImportValue: One stack exports a value (e.g., VPC ID),
+       another stack imports it with !ImportValue. Creates an explicit
+       dependency — the exporting stack cannot be deleted while another
+       imports from it.
+     - Nested stacks: A parent template references child templates via
+       AWS::CloudFormation::Stack, automating ordering.
+     - Manual ordering in deploy script: deploy VPC stack, then security
+       groups, then ECS, etc.
+
+     In this project, separate stacks are deployed in dependency order
+     by the CI/CD pipeline.
+
+Q15. What CloudFormation resource types are used for Fargate?
+
+A15. Core resources for a Fargate service:
+     - AWS::ECS::Cluster           — logical grouping of tasks
+     - AWS::ECS::TaskDefinition    — container definition (image, CPU,
+                                     memory, env vars, secrets, log driver)
+     - AWS::ECS::Service           — desired task count, deployment config,
+                                     load balancer integration
+     - AWS::IAM::Role              — task execution role (ECR pull, CloudWatch
+                                     logs) and task role (app permissions)
+     - AWS::ElasticLoadBalancingV2::TargetGroup — ALB target group
+     - AWS::ElasticLoadBalancingV2::ListenerRule — routing rule
+
+--------------------------------------------------------------------------------
+SECTION D — CI/CD & GITHUB ACTIONS
+--------------------------------------------------------------------------------
+
+Q16. Explain how GitHub Actions OIDC federation with AWS works.
+
+A16. Instead of storing long-lived AWS access keys as GitHub Secrets,
+     OIDC federation is used:
+     1. AWS IAM has an OIDC identity provider for token.actions.githubusercontent.com.
+     2. An IAM role has a trust policy allowing GitHub to assume it, restricted
+        to specific repo and branch:
+        Condition: {StringLike: {
+          "token.actions.githubusercontent.com:sub":
+            "repo:EliLillyCo/lrl-prd-autogen-infra:ref:refs/heads/main"
+        }}
+     3. In the workflow, aws-actions/configure-aws-credentials@v4 with
+        role-to-assume: <ROLE_ARN> performs the OIDC token exchange.
+     4. The workflow gets temporary STS credentials (valid 1 hour) scoped
+        to the assumed role's permissions.
+
+     Benefits: no long-lived credentials, automatic expiry, full audit
+     trail in CloudTrail, easy revocation by modifying the IAM role.
+
+Q17. How do you structure a CI/CD pipeline for a multi-service repository?
+
+A17. In this project, each service repo has its own workflow. Key patterns:
+     - Path-based triggers: only rebuild services that changed.
+       on: push: paths: ['middleware/**', 'shared/**']
+     - Matrix builds: run tests against multiple Python versions in parallel.
+     - Reusable workflows: shared steps (docker-build, ecr-push) extracted
+       into workflow_call reusable workflows.
+     - Environment gates: prod deployments require a GitHub Environment
+       approval (manual reviewer must approve).
+     - Rollback step: on failure, re-deploy the previous ECS task definition
+       revision.
+
+Q18. How do you manage Docker image tagging in your CI/CD pipeline?
+
+A18. Best practice implemented here:
+     - Tag with git SHA: lrl-prd-autogen-middleware:abc1234
+     - Tag with environment: lrl-prd-autogen-middleware:prod-latest
+     - Tag with semantic version for releases: :1.2.0
+
+     The SHA tag makes every image traceable back to the exact commit.
+     ECS task definitions reference SHA-tagged images so rollback is
+     as simple as updating the task definition to a previous SHA tag.
+     "latest" tag is avoided in production — it is ambiguous and makes
+     rollback unreliable.
+
+Q19. How do you run tests in CI without slowing the pipeline?
+
+A19. Strategies:
+     - Parallelize: pytest-xdist runs tests in parallel workers.
+     - Caching: cache pip install via actions/cache keyed on
+       requirements.txt hash.
+     - Test isolation: conftest.py fixtures provide in-memory mock DynamoDB
+       (moto library) and mock S3, avoiding real AWS calls in unit tests.
+     - Only run integration tests on main branch merges, not on every PR.
+     - Fail fast: --maxfail=1 in pytest stops the run on first failure to
+       give fast feedback.
+
+--------------------------------------------------------------------------------
+SECTION E — SECURITY & IAM
+--------------------------------------------------------------------------------
+
+Q20. What is the principle of least privilege and how is it applied here?
+
+A20. Least privilege means granting only the minimum permissions required
+     to perform a task. Applied in this project:
+     - Each ECS Fargate task has its own IAM task role with permissions
+       scoped to only the DynamoDB tables, S3 buckets, and Secrets it
+       needs (no wildcard Resource: "*").
+     - Lambda execution roles are separate from Fargate task roles.
+     - Protocol Parser Lambda can read from raw S3 bucket and write to
+       parsed S3 bucket — it has no DynamoDB permissions.
+     - GitHub Actions IAM roles are scoped to CloudFormation and ECR
+       operations only — no access to runtime data.
+     - Federated roles restrict assumption by specific GitHub repo and
+       branch combinations.
+
+Q21. How does the API key authentication mechanism work in this project?
+
+A21. At startup, FastAPI calls load_api_key_to_env() which uses boto3 to
+     fetch the API key from AWS Secrets Manager and sets it in os.environ.
+
+     APIKeyMiddleware (a Starlette BaseHTTPMiddleware) intercepts every
+     request. For paths under /api/*, it reads the x-api-key header and
+     compares it to the value from os.environ. If missing or mismatched,
+     it returns 401 Unauthorized. The /health endpoint is excluded from
+     key checks (needed by ALB health checks).
+
+     The Swagger UI (via custom_openapi()) shows a lock icon, signalling
+     that all API endpoints require authentication.
+
+     The key itself rotates via Secrets Manager rotation policies.
+     On rotation, the ECS tasks must be restarted (or the value re-read
+     from Secrets Manager) — a future improvement would be to re-fetch
+     on each request or cache with TTL.
+
+Q22. How do you prevent secrets from leaking in Docker builds?
+
+A22. In this project:
+     - JFrog Artifactory credentials are passed via BuildKit
+       --mount=type=secret at build time. They are never written to
+       image layers.
+     - No ENV or ARG instructions contain sensitive values.
+     - .dockerignore excludes .env files, local config files.
+     - ECR image scanning (Amazon Inspector) is enabled to catch post-
+       build secrets or vulnerability issues.
+     - Git hooks (pre-commit with detect-secrets) prevent credentials
+       from being committed.
+
+Q23. How does CORS work in this FastAPI application?
+
+A23. CORSMiddleware is added to the FastAPI app with:
+     allow_origins=[f"https://{FE_URL.FE_URL}"]  — single allowed origin
+     allow_credentials=True                        — cookies/auth headers OK
+     allow_methods=["GET","POST","PUT","DELETE"]   — explicit method list
+     allow_headers=["*"]                           — all headers allowed
+
+     CORS middleware is added BEFORE APIKeyMiddleware because middleware
+     in Starlette/FastAPI is applied in reverse registration order. CORS
+     preflight OPTIONS requests must not be blocked by the API key check.
+
+     Restricting allow_origins to the single frontend URL prevents CSRF
+     and cross-origin data theft from other websites.
+
+--------------------------------------------------------------------------------
+SECTION F — OBSERVABILITY, LOGGING & MONITORING
+--------------------------------------------------------------------------------
+
+Q24. How is structured logging implemented in this project?
+
+A24. The project uses structlog, a Python library for structured (JSON)
+     logging. Key aspects:
+     - configure_logger() sets up a global structlog configuration with
+       processors that add timestamps, log levels, and context.
+     - Per-service loggers: logger = structlog.get_logger(service="reports-
+       service"). The service name is automatically included in every log
+       entry.
+     - Contextual logging: logger.info("Entering function", business=biz,
+       owner_id=oid) produces JSON like:
+       {"event":"Entering function","service":"reports-service",
+        "business":"oncology","owner_id":"usr123","level":"info"}
+     - Consistent entry/exit logging on every route function for trace.
+     - Lambda functions use a separate common/logger_utils.py but follow
+       the same structured pattern.
+     - All logs flow to CloudWatch Logs -> Lambda forwarder -> OpenSearch.
+
+Q25. How do you monitor ECS Fargate containers?
+
+A25. Multi-layer observability:
+     - CloudWatch Container Insights: CPU, memory, network metrics per
+       task and service. Alarms on CPU > 80% trigger scale-out.
+     - CloudWatch Logs: uvicorn access logs + structlog app logs
+       captured via awslogs log driver in task definition.
+     - ALB metrics: RequestCount, TargetResponseTime, HTTPCode_ELB_5XX.
+     - Custom metrics: report generation duration emitted as CloudWatch
+       custom metric from Lambda.
+     - Health check endpoint: /health polled by ALB every 30s. If 3
+       consecutive failures, task is drained and replaced.
+     - Dashboards: CloudWatch dashboards aggregate key metrics per
+       environment.
+
+Q26. What would you do when a production ECS task keeps restarting?
+
+A26. Systematic diagnosis:
+     1. Check ECS service events: aws ecs describe-services — look for
+        "task failed ELB health checks" or "out of memory" stop codes.
+     2. CloudWatch Logs: fetch last 100 lines from the container log stream
+        to see the last error before exit.
+     3. ECS stopped task reasons: aws ecs describe-tasks — StopCode and
+        StoppedReason fields often have the exact cause.
+     4. Common causes:
+        - OOMKilled: task ran out of memory — increase task memory in
+          task definition.
+        - Exit code 1: application startup error — check logs for
+          missing env var, failed Secrets Manager fetch, bad import.
+        - Health check failure: application started but /health is
+          returning non-200 — check if downstream dependency (DynamoDB,
+          Secrets Manager) is unreachable.
+        - Missing secret: load_api_key_to_env() fails if the secret
+          ARN is wrong or the task role lacks secretsmanager:GetSecretValue.
+     5. Reproduce locally: docker run with equivalent env vars to isolate.
+
+--------------------------------------------------------------------------------
+SECTION G — NETWORKING & LOAD BALANCING
+--------------------------------------------------------------------------------
+
+Q27. Explain how ALB path-based routing works in this project.
+
+A27. The ALB has a single HTTPS listener (port 443). Listener rules are
+     evaluated in priority order (lowest number first):
+
+     Priority 1: path /api/* -> forward to middleware ECS target group
+     Priority 2: path /docauthor/* -> forward to doc-authoring target group
+     Default:    all other paths -> forward to autogen-ui target group
+
+     This is defined in config/containers.yaml where each service has a
+     prefix (/api, /docauthor) and a priority. The CloudFormation Fargate
+     templates read this config to create ListenerRules.
+
+     ALB sticky sessions are not needed because:
+     - REST APIs are stateless (session state in DynamoDB).
+     - WebSocket connections (/api/socket) are handled by ALB's built-in
+       WebSocket support (no special config needed, ALB auto-detects
+       Upgrade: websocket header).
+
+Q28. What is a Target Group and how do health checks work?
+
+A28. A Target Group is an ALB construct that holds a list of registered
+     targets (ECS tasks in this case). The ALB distributes traffic across
+     healthy targets in the group.
+
+     Health check configuration (typical values):
+       Protocol: HTTP
+       Path: /health
+       HealthyThresholdCount: 2   (2 consecutive 200s = healthy)
+       UnhealthyThresholdCount: 3 (3 consecutive failures = unhealthy)
+       Interval: 30 seconds
+       Timeout: 5 seconds
+
+     ECS registers new task ENI IPs into the target group on startup.
+     If health checks fail, ALB stops routing to that IP and ECS
+     eventually replaces the task.
+
+Q29. How do you configure VPC networking for ECS Fargate tasks?
+
+A29. Fargate tasks are launched into private subnets (no public IP by
+     default). Network access is controlled by:
+     - Security Group on the task ENI: allow inbound from ALB security
+       group on port 8080 only. Allow outbound to DynamoDB, S3, OpenSearch
+       VPC endpoints (or via NAT Gateway to internet for Secrets Manager
+       if not using VPC endpoint).
+     - Security Group on the ALB: allow inbound 443 from 0.0.0.0/0 (or
+       corporate IP ranges). Allow outbound to Fargate SG on 8080.
+     - VPC Endpoints for AWS services (S3, DynamoDB, Secrets Manager)
+       reduce data transfer costs and eliminate NAT Gateway dependency
+       for those services.
+
+--------------------------------------------------------------------------------
+SECTION H — PYTHON/FASTAPI BACKEND DEVOPS
+--------------------------------------------------------------------------------
+
+Q30. How do you manage Python dependencies securely in this project?
+
+A30. requirements.txt with pinned versions (==) for all direct and
+     transitive dependencies — eliminates supply chain surprises on rebuild.
+
+     Private PyPI mirror via JFrog Artifactory: all pip install commands
+     use --index-url pointing to Lilly's internal Artifactory instance.
+     This means:
+     - No direct internet PyPI access from build environment.
+     - Artifactory proxies and caches packages; security team can block
+       malicious packages.
+     - JFrog Xray scans packages for vulnerabilities before allowing them.
+     - Credentials for Artifactory injected via BuildKit secrets at build.
+
+     Regular dependency updates: Dependabot (or equivalent) opens PRs to
+     bump pinned versions; PRs run the full test suite before merging.
+
+Q31. What is uvicorn and how do you run FastAPI in production?
+
+A31. Uvicorn is an ASGI (Asynchronous Server Gateway Interface) server for
+     Python. FastAPI is built on the ASGI standard. In production:
+
+     CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8080"]
+
+     For higher throughput (multiple CPU cores), uvicorn is often run with
+     --workers N (multiple processes) or behind gunicorn as a process
+     manager: gunicorn -k uvicorn.workers.UvicornWorker.
+
+     In ECS Fargate, horizontal scaling (more tasks) is preferred over
+     vertical scaling within a single container. ECS Service Auto Scaling
+     adds more tasks based on CPU/memory metrics, each running a single
+     uvicorn process. This keeps containers simple and crash-isolated.
+
+Q32. How do you handle database migrations for DynamoDB?
+
+A32. DynamoDB is schemaless (NoSQL), so traditional SQL migrations don't
+     apply. However, table-level schema changes require care:
+     - Adding a new attribute: just start writing it; DynamoDB allows
+       sparse attributes.
+     - Changing partition key or sort key: requires creating a new table
+       and migrating data (DynamoDB doesn't support in-place key changes).
+     - Adding a GSI: online operation, no downtime, but provisioning
+       throughput must be adequate.
+     - Data migrations (backfilling new attributes): run a Lambda or
+       script to scan + update existing items; use Scan with
+       pagination for large tables.
+     - CloudFormation manages table creation; table updates (like new GSIs)
+       are applied via CloudFormation updates.
+
+--------------------------------------------------------------------------------
+SECTION I — MICROSERVICES & ARCHITECTURE PATTERNS
+--------------------------------------------------------------------------------
+
+Q33. Why is the backend split into middleware and doc-authoring services?
+
+A33. Separation of concerns and independent scalability:
+     - Middleware service handles high-frequency, low-latency API calls
+       (UI interactions, data fetches). It may receive many concurrent
+       requests.
+     - Doc-authoring service handles CPU-intensive DOCX/PDF generation,
+       which takes longer and needs different resource allocation (more
+       CPU/memory in the ECS task definition).
+     - They can be scaled, deployed, and updated independently. A bug in
+       doc-authoring doesn't take down the main API.
+     - They can have different versioning and release cycles.
+     - Security boundaries: if doc-authoring is compromised, the blast
+       radius is limited (it has fewer IAM permissions than the main
+       middleware).
+
+Q34. How do you handle inter-service communication in this architecture?
+
+A34. Services communicate via HTTP using the internal ALB DNS name
+     (ALB_URL env var). The middleware service makes HTTPX async calls
+     to the doc-authoring service via the ALB. This means:
+     - Traffic stays internal (ALB is in the VPC).
+     - Authentication: requests include the x-api-key header even for
+       internal calls.
+     - Timeout + retry: HttpxClient wrapper handles timeouts and retries
+       with exponential backoff.
+     - Decoupling: services don't call each other directly by IP; they
+       use the ALB DNS name, so tasks can be replaced without URL changes.
+
+Q35. What is the WebSocket pattern used for and how does it work with ALB?
+
+A35. Report generation is a long-running async process (minutes). Instead
+     of the frontend polling GET /api/reports every few seconds, a WebSocket
+     connection (/api/socket/ws/{connection_id}) is opened when generation
+     starts. When the Lambda pipeline completes, the backend calls
+     notify_active_connections() which sends a message to the open WebSocket,
+     instantly updating the UI.
+
+     ALB WebSocket support: ALB natively supports WebSocket. It detects the
+     HTTP Upgrade: websocket header and establishes a persistent connection
+     to the backend ECS task. The ALB idle timeout must be configured to
+     be longer than the maximum expected report generation time, otherwise
+     the connection is dropped.
+
+     Consideration: in-memory WebSocket connection dictionaries work with
+     a single ECS task. With multiple tasks, a shared store (ElastiCache /
+     Redis) or sticky sessions would be needed for WS state.
+
+--------------------------------------------------------------------------------
+SECTION J — INCIDENT RESPONSE & TROUBLESHOOTING
+--------------------------------------------------------------------------------
+
+Q36. Walk through how you would diagnose a 502 error from the ALB.
+
+A36. 502 Bad Gateway from an ALB means the ALB reached the target but got
+     an invalid response. Diagnosis steps:
+     1. ALB access logs (S3): check target_status_code. If it shows
+        502, the ECS task responded but incorrectly. If target was
+        unreachable, it shows a connection error.
+     2. ECS task logs (CloudWatch): look for Python exceptions, startup
+        errors, or the task not starting uvicorn properly.
+     3. ECS service events: check if tasks are healthy in the target group.
+     4. Target group health: aws elbv2 describe-target-health — check
+        if any targets are "unhealthy".
+     5. Security group: confirm ALB SG allows outbound on 8080 to the
+        Fargate task SG; Fargate task SG allows inbound from ALB SG.
+     6. Task resource limits: if the task is OOM, the process may die
+        before responding — check CloudWatch metrics for MemoryUtilized.
+     7. Startup script: load_api_key_to_env() failing at startup would
+        prevent the app from starting — test Secrets Manager access
+        from within the container.
+
+Q37. How do you perform a rollback for a bad ECS deployment?
+
+A37. ECS stores task definition revisions (numbered). To rollback:
+     1. Identify the last good revision:
+        aws ecs describe-task-definition --task-definition <name>
+        (or check deployment history in GitHub Actions artifacts)
+     2. Update the service to the previous revision:
+        aws ecs update-service \
+          --cluster <cluster-name> \
+          --service <service-name> \
+          --task-definition <family>:<previous-revision>
+     3. ECS performs a rolling replacement: new tasks from old definition
+        are registered in target group, health checks pass, old (broken)
+        tasks are drained.
+     4. Monitor CloudWatch until all tasks are running the old revision.
+     5. Optionally, revert the CI/CD pipeline to the previous commit so
+        the next deployment is the fixed version.
+
+Q38. A Lambda function is timing out intermittently. How do you debug it?
+
+A38. Lambda timeout debugging approach:
+     1. CloudWatch Logs: search for "Task timed out after" messages.
+        Find the request ID of timed-out invocations.
+     2. Duration metrics: CloudWatch Logs Insights query —
+        filter @message like "REPORT" | stats max(@duration), avg(@duration)
+        to understand the distribution.
+     3. Common causes in this project:
+        - LLM API call (summary_generation.py) taking too long — check
+          response times for the external LLM service.
+        - S3 read of large documents — increase Lambda memory (also
+          increases CPU proportionally).
+        - Cold start: if Lambda runs in VPC, ENI attachment adds ~500ms
+          cold start. Use provisioned concurrency for latency-sensitive
+          paths.
+     4. X-Ray tracing: enable AWS X-Ray on the Lambda to get sub-segment
+        timing (exact time spent in each service call).
+     5. Solution options: increase timeout limit (max 15 min), increase
+        memory, optimise the slow code path, add caching.
+
+Q39. How would you handle a secret rotation event in Secrets Manager without
+     downtime for the running ECS tasks?
+
+A39. Challenge: ECS tasks load the API key at startup. If the secret rotates,
+     running tasks still have the old key in memory while clients start
+     using the new key.
+
+     Approach 1 — Graceful rotation window: Secrets Manager rotation can
+     maintain both old and new secret values during a rotation window.
+     All active tasks continue to work with the old key; new tasks get the
+     new key on startup.
+
+     Approach 2 — Dynamic secret fetching: Modify load_api_key_to_env() to
+     re-fetch from Secrets Manager periodically (e.g., every 5 minutes with
+     a cached value and TTL). On rotation, the in-memory cache expires and
+     the new key is loaded without restarting tasks.
+
+     Approach 3 — Rolling restart: Trigger a forced ECS deployment on
+     rotation (Lambda hooked to Secrets Manager rotation event -> calls
+     aws ecs update-service --force-new-deployment). ECS replaces tasks
+     rolling, new tasks start with the new key, old tasks are drained
+     gracefully. This project approach is simplest to implement.
+
+Q40. What metrics and alarms would you set up for this system?
+
+A40. Critical alarms:
+     ALB:
+       - HTTPCode_ELB_5XX_Count > 10 per minute -> PagerDuty/SNS alert
+       - TargetResponseTime P99 > 5s
+       - UnHealthyHostCount > 0 (immediate alert)
+     ECS:
+       - CPUUtilization > 80% (sustained) -> trigger scale-out
+       - MemoryUtilization > 85% -> alert (risk of OOM)
+       - RunningTaskCount < DesiredTaskCount -> alert (tasks crashing)
+     Lambda:
+       - Errors > 5 per 5 minutes -> alert
+       - Duration P95 > 80% of timeout limit -> alert (timeout risk)
+       - Throttles > 0 -> investigate concurrency limits
+     DynamoDB:
+       - SystemErrors > 0 -> alert (AWS-side issues)
+       - SuccessfulRequestLatency P99 > 100ms -> investigate hot partitions
+     OpenSearch:
+       - ClusterStatus.Red -> critical alert
+       - JVMMemoryPressure > 85% -> alert
+
+     All alarms send to SNS topic -> email + PagerDuty integration for P1.
+
+
+================================================================================
+END OF DOCUMENT
+================================================================================
+Reference: AutoGen Project — LRL WBWD POD2, Eli Lilly
+This document covers project architecture, system design, and 40 DevOps
+interview Q&A relevant to a 4-5 year experienced DevOps Engineer.
+Technologies: AWS (ECS Fargate, Lambda, DynamoDB, OpenSearch, S3, ALB,
+CloudFormation, Secrets Manager, ECR), Docker, Python/FastAPI, React,
+GitHub Actions, Azure AD MSAL, JFrog Artifactory.
+================================================================================
